@@ -98,6 +98,7 @@ class Trial:
     speed_ll: float
     leg_length: float
     event_source: str
+    ang: np.ndarray = field(default=None, repr=False)      # [T, 6] sagittal angles (deg), ANG_NAMES
     ev_soft: np.ndarray = field(default=None, repr=False)  # [T, 4] Gaussian event targets
 
 
@@ -136,14 +137,14 @@ def _load(args) -> Trial | None:
     events_s = {k: v / fs for k, v in ev.items()}
     tr = Trial(ds, row["trial"], row["subject"], row["mode"], sag30[:, IN_IDX].astype(np.float32),
                events_s, S, float(row["speed"]) / float(row["leg_length_sag"]),
-               float(row["leg_length_sag"]), "grf" if gold else "zeni")
+               float(row["leg_length_sag"]), "grf" if gold else "zeni", ang30.astype(np.float32))
     tr.ev_soft = soft_events(events_s, len(sag30))
     return tr
 
 
 def load_all(workers: int = 10, cache: bool = True) -> dict[str, list[Trial]]:
     """{'train'|'val'|'test': [Trial]} for all kept trials."""
-    path = PROC / "model_trials.pkl"
+    path = PROC / "model_trials_v2.pkl"
     if cache and path.exists():
         with open(path, "rb") as f:
             return pickle.load(f)
@@ -190,6 +191,42 @@ def aggregate(S: np.ndarray, t0: float, t1: float, speed_ll: float = np.nan) -> 
             lv, rv = col[c][left].mean(), col[c][right].mean()
             y[TI[si]] = 100 * (lv - rv) / (0.5 * (lv + rv))
     return y
+
+
+def strides_from_events(ev_s: dict[str, np.ndarray], ang: np.ndarray | None) -> np.ndarray:
+    """Stride table from (predicted) event times in seconds and 30 Hz angle curves [T, 6].
+
+    Same definitions as canonical.stride_table, but with sub-frame event times.
+    """
+    rows = []
+    for si, s in enumerate(SIDES):
+        o = SIDES[1 - si]
+        hs, to = np.sort(ev_s[f"HS_{s}"]), np.sort(ev_s[f"TO_{s}"])
+        hs_o, to_o = np.sort(ev_s[f"HS_{o}"]), np.sort(ev_s[f"TO_{o}"])
+        for a, b in zip(hs[:-1], hs[1:]):
+            st = b - a
+            if not 0.6 < st < 2.5:
+                continue
+            t_off, o_hs, o_to = (e[(e > a) & (e < b)] for e in (to, hs_o, to_o))
+            if len(t_off) != 1 or len(o_hs) != 1 or len(o_to) != 1:
+                continue
+            stance = t_off[0] - a
+            row = [a, b, si, st, o_hs[0] - a, stance, st - stance, 100 * stance / st,
+                   (o_to[0] - a) + (t_off[0] - o_hs[0])]
+            if ang is not None:
+                seg = ang[max(0, int(round(a * FS))):int(round(b * FS)) + 1, 3 * si:3 * si + 3]
+                if len(seg) < 2:
+                    continue
+                row += list(seg.max(0) - seg.min(0)) + [seg[:, 1].max()]
+            else:
+                row += [np.nan] * 4
+            rows.append(row)
+    return np.array(rows, float).reshape(-1, 3 + len(STRIDE_COLS))
+
+
+def derive(ev_s: dict[str, np.ndarray], ang: np.ndarray | None, T: int, speed_ll: float = np.nan) -> np.ndarray:
+    """Window labels computed from predicted events + angle curves (same formulas as the gold labels)."""
+    return aggregate(strides_from_events(ev_s, ang), 0, (T - 1) / FS, speed_ll)
 
 
 def window_labels(tr: Trial, i0: int, i1: int) -> np.ndarray:
