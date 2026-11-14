@@ -1,0 +1,9 @@
+# raw + processed datasets (~70 GB)
+data/
+# legacy uv venv (superseded by flake.nix)
+.venv/
+outputs/
+.ipynb_checkpoints/
+__pycache__/
+result
+result-*
