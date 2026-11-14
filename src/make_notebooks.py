@@ -1,6 +1,6 @@
 """Generate the analysis notebooks in notebooks/ (then execute them with nbconvert).
 
-    ./py src/make_notebooks.py && (cd notebooks && ../.venv/bin/jupyter nbconvert --execute --inplace *.ipynb)
+    ./py src/make_notebooks.py && (cd notebooks && nix develop .. -c jupyter nbconvert --execute --inplace 0[1-5]*.ipynb)
 """
 from pathlib import Path
 
@@ -57,8 +57,11 @@ summary.round(2)""",
 Each trial is rejected for the first rule it fails (thresholds in `build_dataset.QC`):
 missing markers after ≤0.1 s gap filling (long treadmill trials are cropped to their longest clean
 ≥10 s stretch instead), implausible leg length, poor rigid-cluster fit (Ferber), speed outside
-walking range (>2.2 m/s ⇒ likely a jog), too few valid strides, stride-time CoV > 20 % (event failure),
-no foot landmarks (Ferber sessions recorded without toe/metatarsal markers).""",
+walking range (>2.2 m/s ⇒ likely a jog), too few valid strides, stride-time CoV > 20 % (event failure).
+
+~40 % of Ferber sessions were recorded without any foot landmarks (no toe, no metatarsal markers).
+Rather than drop them they get a **virtual foot** (`toe_source == "virtual"`, see notebook 02) —
+filter on that column if you want marker-only data.""",
 """reasons = T.groupby(["dataset", "reject_reason"]).size().unstack(fill_value=0).reindex(DATASETS)
 order = ["kept"] + [c for c in reasons.sum().sort_values(ascending=False).index if c != "kept"]
 reasons = reasons[order]
@@ -87,8 +90,8 @@ fig, axs = plt.subplots(1, 3, figsize=(12, 3.2))
 bins = np.arange(10, 101, 5)
 for d in DATASETS:
     a = S.loc[S.dataset == d, "age"].dropna()
-    axs[0].hist(a, bins=bins, color=COL[d], alpha=0.85, label=f"{d} (n={len(a)})", edgecolor=SURFACE, linewidth=1)
-axs[0].set_title("Age (one row per subject)"); axs[0].set_xlabel("years"); axs[0].legend(fontsize=8)
+    axs[0].hist(a, bins=bins, color=COL[d], alpha=0.85, label=f"{d} (n={len(a)})", edgecolor=SURFACE, linewidth=1, density=True)
+axs[0].set_title("Age (one row per subject)"); axs[0].set_ylabel("density"); axs[0].set_xlabel("years"); axs[0].legend(fontsize=8)
 for d in DATASETS:
     sp = K.loc[K.dataset == d, "speed"].dropna()
     axs[1].hist(sp, bins=np.arange(0.2, 2.4, 0.05), color=COL[d], alpha=0.85, label=d, density=True,
@@ -157,7 +160,7 @@ Checks that each loader's joint centres are anatomically sane and that the sagit
 {DISCLAIMER}""",
 SETUP,
 """examples = {"fukuchi": "WBDS10walkT05", "ferber": trials("ferber", True).trial.iloc[5], "toronto": "OAW03_pass1"}
-fig, axs = plt.subplots(1, 3, figsize=(13, 4), sharey=True)
+fig, axs = plt.subplots(1, 3, figsize=(14, 2.6), sharey=True, layout="constrained")
 bones = [("pelvis", "{s}_hip"), ("{s}_hip", "{s}_knee"), ("{s}_knee", "{s}_ankle"),
          ("{s}_ankle", "{s}_heel"), ("{s}_heel", "{s}_toe"), ("{s}_ankle", "{s}_toe")]
 for ax, (ds, tr) in zip(axs, examples.items()):
@@ -173,9 +176,10 @@ for ax, (ds, tr) in zip(axs, examples.items()):
         ax.scatter(sag[f, :, 0] + off, sag[f, :, 1], s=8, color=INK, zorder=3)
     ax.set_title(f"{ds}: {tr}"); ax.set_aspect("equal"); ax.set_xlabel("forward (leg lengths, offset per frame)")
 axs[0].set_ylabel("up (leg lengths)")
-axs[0].plot([], [], color=SIDE_COL["L"], label="left"); axs[0].plot([], [], color=SIDE_COL["R"], label="right"); axs[0].legend(loc="upper left")
+axs[0].plot([], [], color=SIDE_COL["L"], label="left"); axs[0].plot([], [], color=SIDE_COL["R"], label="right")
+fig.legend(loc="upper right", ncol=2, fontsize=9)
 fig.suptitle("One left stride (HS→HS), 7 snapshots — pelvis-centred, leg-length-scaled, 30 Hz", x=0.01, ha="left", fontsize=11)
-fig.tight_layout(); save(fig, "02_stick_figures"); plt.show()""",
+save(fig, "02_stick_figures"); plt.show()""",
 """md:## Keypoint trajectories in the normalised frame
 What the model sees: pelvis-centred, leg-length-scaled 2D coordinates resampled to 30 Hz.""",
 """fig, axs = plt.subplots(2, 3, figsize=(13, 5.5), sharex=True)
@@ -220,6 +224,28 @@ axs[1].bar([f"{int(f)} Hz" for f in fs.index], fs.values, color=SERIES[1], width
 axs[1].set_title("Ferber sampling rates (resampled to 30 Hz downstream)"); axs[1].grid(axis="x", visible=False)
 fig.tight_layout(); save(fig, "02_ferber_qc"); plt.show()
 R.toe_source.value_counts(dropna=False)""",
+"""md:### Virtual foot (Ferber sessions with no foot landmarks)
+Heel = most posterior foot-cluster marker at floor height; toe = static ankle centre + 0.122 × height
+straight ahead (subjects stood feet-forward on a template). Both ride on the foot cluster.
+Validated by stripping the toe/metatarsal markers from 25 sessions that have them and re-running
+the pipeline:
+
+| label | MAE virtual vs real | r |
+|---|---|---|
+| cadence | 0.00 steps/min | 1.000 |
+| stance % | 0.13 % | 0.997 |
+| step-time SI | 0.04 % | 1.000 |
+| knee ROM | 0.00° | 1.000 |
+| ankle ROM | 1.2° (−1.0° bias) | 0.980 |
+
+Only the ankle angle (which uses the toe) is materially affected.""",
+"""fig, axs = plt.subplots(1, 3, figsize=(13, 3.2))
+for a, c in zip(axs, ["ankle_rom", "stance_pct", "knee_rom"]):
+    for i, src in enumerate(["marker", "virtual"]):
+        v = R.loc[R.keep & (R.toe_source == src), c]
+        a.hist(v, bins=40, density=True, color=SERIES[i], alpha=0.7, label=f"{src} (n={len(v)})", edgecolor=SURFACE, linewidth=0.3)
+    a.set_title(c); a.legend(fontsize=8)
+fig.suptitle("Ferber labels by foot source", x=0.01, ha="left", fontsize=11); fig.tight_layout(); save(fig, "02_ferber_virtual_foot"); plt.show()""",
 """md:## Projection plane check
 For treadmill trials the progression axis is the belt axis (snapped from mean heel→toe direction);
 for overground it's PCA of the pelvis path. Out-of-plane (medio-lateral) motion is discarded —
@@ -332,7 +358,7 @@ fig, axs = plt.subplots(1, len(cs), figsize=(14, 3.4), sharey=True)
 for a, c in zip(axs, cs):
     data = [R.loc[R.grp == g, c].dropna().clip(-25, 25) for g in order]
     bp = a.boxplot(data, vert=False, widths=0.55, patch_artist=True, showfliers=False)
-    for i, b in enumerate(bp["boxes"]): b.set(facecolor=[GRID, SERIES[0], SERIES[1], "#c3c2b7"][i], color=INK2)
+    for i, b in enumerate(bp["boxes"]): b.set(facecolor=[GRID, SERIES[0], SERIES[1], "#c3c2b7"][i], edgecolor=INK2)
     for m in bp["medians"]: m.set(color=INK, lw=2)
     a.axvline(0, color=INK2, lw=1, ls=":"); a.set_title(c.replace("SI_", "SI "), fontsize=10); a.set_xlabel("SI (%)")
     a.set_yticks(range(1, 5), [f"{g} (n={len(x)})" for g, x in zip(order, data)])
@@ -487,7 +513,10 @@ fig.tight_layout(); save(fig, "05_pose_quality"); plt.show()
 PC.groupby("estimator")[["n_frames", "duration_s", "mean_conf", "frac_lowconf"]].mean().round(3)""",
 """md:### One clip, three estimators (frontal view, image coordinates)""",
 """clips = LT.pose_clips()
-pick = clips[(clips.pid == 3) & (clips.camera == "bottom") & (clips.direction == "front") & (clips.clip == 1)]
+key = ["pid", "camera", "direction", "clip"]
+common = clips.groupby(key).estimator.nunique().loc[lambda n: n == 3].index[0]   # a clip all 3 estimators processed
+pick = clips.set_index(key).loc[common].reset_index().sort_values("estimator", key=lambda e: e.map({"OpenPose": 0, "Alphapose": 1, "Detectron": 2}))
+print("clip:", dict(zip(key, common)))
 fig, axs = plt.subplots(1, 2, figsize=(13, 3.6))
 for i, r in enumerate(pick.itertuples()):
     p = LT.load_pose(r.path)
@@ -495,7 +524,7 @@ for i, r in enumerate(pick.itertuples()):
     axs[0].plot(p["t"], a, color=SERIES[i], label=r.estimator, lw=1.5)
     axs[1].plot(p["t"], np.nanmean(p["conf"], 1), color=SERIES[i], label=r.estimator, lw=1.5)
 axs[0].invert_yaxis(); axs[0].set_title("Left ankle vertical pixel position (towards camera)"); axs[0].set_xlabel("s"); axs[0].set_ylabel("px (down)")
-axs[1].set_title("Mean keypoint confidence"); axs[1].set_xlabel("s"); axs[0].legend(fontsize=8)
+axs[1].set_title("Mean keypoint confidence (Detectron uses a different score scale)"); axs[1].set_xlabel("s"); axs[0].legend(fontsize=8)
 fig.tight_layout(); save(fig, "05_estimator_compare"); plt.show()""",
 """md:## Xsens-derived gait features vs clinical scores
 Per-subject means over straight passes. n = 11 with a narrow, ceiling-limited score range —
