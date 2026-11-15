@@ -1,6 +1,4 @@
 """Figures and annotated videos for the demo (matplotlib + OpenCV + ffmpeg)."""
-from __future__ import annotations
-
 import shutil
 import subprocess
 
@@ -11,8 +9,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from analysis import INK2, MUTED, SIDE_COL, style  # noqa: E402
-from gaitdata import ANG_NAMES, FS, IN_JOINTS, STRIDE_COLS  # noqa: E402
+from helpers.analysis import INK2, MUTED, SIDE_COL, style  # noqa: E402
+from helpers.gaitdata import ANG_NAMES, FS, IN_JOINTS  # noqa: E402
 
 style()
 BONES = [("hip", "knee"), ("knee", "ankle"), ("ankle", "heel"), ("heel", "toe"), ("ankle", "toe")]
@@ -60,7 +58,7 @@ def gait_diagram(rep, t_max: float | None = None):
             lo, hi = max(a, c), min(b, d)
             if hi > lo:
                 ax.axvspan(lo, hi, color=MUTED, alpha=0.18, lw=0)
-    for a, b, d, near in rep.passes:
+    for a, b, d in rep.passes:
         ax.axvline(a / FS, color=INK2, lw=0.8, ls=":")
     ax.set_yticks([1, 0], ["Left foot", "Right foot"])
     ax.set_xlabel("time (s)")

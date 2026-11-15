@@ -1,21 +1,10 @@
-"""Pose-noise augmentation: make clean mocap look like video pose-estimator output.
-
-All in the model's units (pelvis-centred, leg-length-scaled; 0.01 ≈ 8 mm on an adult):
-  - per-frame Gaussian keypoint jitter (`sigma`)
-  - per-joint constant offset: keypoints sit on the skin/shoe, not on joint centres (`bias`)
-  - random keypoint dropout (`dropout`): coordinates zeroed, visibility flag 0
-  - far-leg occlusion: the leg away from the camera is noisier and disappears where it
-    crosses behind the near leg
-  - camera effects: leg-length estimate error (scale) and a slightly tilted camera (rotation)
-The pelvis origin is re-derived from the *noisy* hips, as it would be from a pose estimator.
-"""
-from __future__ import annotations
-
+"""Training augmentation: make clean mocap look like video pose (noise), mirror left/right, and create
+synthetic limps (one leg shifted in time or bending more/less). Units: leg lengths (0.01 ≈ 8 mm)."""
 from dataclasses import dataclass
 
 import numpy as np
 
-from gaitdata import IN_JOINTS
+from helpers.gaitdata import ANG_NAMES, EVENTS, FS, IN_JOINTS, derive, soft_events
 
 HIPS = [IN_JOINTS.index("L_hip"), IN_JOINTS.index("R_hip")]
 DISTAL = {s: [IN_JOINTS.index(f"{s}_{j}") for j in ("knee", "ankle", "heel", "toe")] for s in "LR"}
@@ -24,6 +13,8 @@ SIDE_IDX = {s: [i for i, j in enumerate(IN_JOINTS) if j.startswith(s)] for s in 
 
 @dataclass
 class Noise:
+    """Video-like pose error: per-frame jitter, a constant offset per keypoint, dropped keypoints, a noisier far
+    leg hidden where it crosses the near one, and camera effects (leg-length scale error, tilt)."""
     sigma: float = 0.0
     bias: float = 0.0
     dropout: float = 0.0
@@ -95,11 +86,9 @@ def swap_sides(x, ev, ang, y, si_idx):
     return x[:, JOINT_SWAP], ev[:, EVENT_SWAP], ang[:, ANGLE_SWAP], y
 
 
-# ---------------------------------------------------------------- synthetic asymmetry
-# Most training subjects are near-symmetric, so a model learns "the legs are half a cycle
-# apart with equal excursions" as a prior and shrinks real asymmetry towards it. These
-# augmentations make one leg differ from the other and recompute every label from the
-# modified events and angles (gaitdata.derive), so the prior widens.
+# ---------------------------------------------------------------- synthetic limps
+# Most training people walk almost symmetrically, so without this the model learns to report everyone as
+# symmetric. Labels are recomputed from the modified events and angles.
 LEG = {s: [IN_JOINTS.index(f"{s}_{j}") for j in ("hip", "knee", "ankle", "heel", "toe")] for s in "LR"}
 
 
@@ -117,7 +106,6 @@ def scale_leg(x, ang, side, k_hip, k_knee, k_ankle):
     hip: rotate knee..toe about the hip; knee: rotate ankle..toe about the knee (knee = thigh - shank,
     so the shank turns the other way); ankle: rotate heel, toe about the ankle.
     """
-    from gaitdata import ANG_NAMES
     x, ang = x.copy(), ang.copy()
     h, k, a, he, to = LEG[side]
     for name, kk, pivot, moved, sign in (("hip", k_hip, h, [k, a, he, to], 1), ("knee", k_knee, k, [a, he, to], -1),
@@ -134,7 +122,6 @@ def asymmetric_window(tr, i0, i1, rng, max_shift_s=0.05, k_range=(0.8, 1.25)):
 
     -> (pose [n,10,2], soft events [n,4], angles [n,6], labels) with labels recomputed.
     """
-    from gaitdata import ANG_NAMES, EVENTS, FS, derive, soft_events
     side = "L" if rng.random() < 0.5 else "R"
     n, T = i1 - i0, len(tr.pose)
     shift = rng.uniform(-max_shift_s, max_shift_s)

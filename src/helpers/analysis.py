@@ -1,6 +1,4 @@
-"""Helpers shared by the notebooks: paths, palette, table loading, gait-cycle curves."""
-from __future__ import annotations
-
+"""Shared paths, plot palette and style, trial tables and gait-cycle curves (used by src/ and the notebook)."""
 from pathlib import Path
 
 import matplotlib as mpl
@@ -8,22 +6,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from canonical import J, JOINTS, SIDES, lowpass, sagittal_angles, sagittal_project
+from helpers.canonical import SIDES, lowpass, sagittal_angles, sagittal_project
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PROC = ROOT / "data" / "processed"
 FIG = ROOT / "outputs" / "figures"
 DATASETS = ["fukuchi", "ferber", "toronto"]
-LABEL = {"fukuchi": "Fukuchi (healthy, young+older)", "ferber": "Ferber (runners, walking)",
-         "toronto": "Toronto (older adults)"}
 
 # validated reference palette (dataviz skill) — categorical slots 1-3 are all-pairs safe
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a"]
-COL = dict(zip(DATASETS, SERIES))
 SIDE_COL = {"L": SERIES[0], "R": SERIES[1]}
-SEQ = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
-DIVERGING = mpl.colors.LinearSegmentedColormap.from_list("bu_gy_rd", ["#2a78d6", "#f0efec", "#e34948"])
-SEQ_CMAP = mpl.colors.LinearSegmentedColormap.from_list("seq_blue", SEQ)
 INK, INK2, MUTED, GRID, SURFACE = "#0b0b0b", "#52514e", "#8a8984", "#e6e5e1", "#fcfcfb"
 
 
@@ -32,7 +24,7 @@ def style():
         "figure.facecolor": SURFACE, "axes.facecolor": SURFACE, "savefig.facecolor": SURFACE,
         "figure.dpi": 110, "savefig.dpi": 150, "font.size": 10,
         "axes.edgecolor": MUTED, "axes.labelcolor": INK2, "axes.titlecolor": INK,
-        "axes.titlesize": 11, "axes.titleweight": "semibold", "axes.titlelocation": "left",
+        "axes.titlesize": 11, "axes.titleweight": "bold", "axes.titlelocation": "left",
         "axes.spines.top": False, "axes.spines.right": False,
         "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.8, "axes.axisbelow": True,
         "xtick.color": INK2, "ytick.color": INK2, "text.color": INK,
@@ -42,20 +34,10 @@ def style():
     FIG.mkdir(parents=True, exist_ok=True)
 
 
-def save(fig, name):
-    fig.savefig(FIG / f"{name}.png", bbox_inches="tight")
-
-
 def trials(ds: str, kept_only=False) -> pd.DataFrame:
     t = pd.read_parquet(PROC / ds / "trials.parquet")
     t["dataset"] = ds
     return t[t.keep] if kept_only else t
-
-
-def strides(ds: str) -> pd.DataFrame:
-    s = pd.read_parquet(PROC / ds / "strides.parquet")
-    s["dataset"] = ds
-    return s
 
 
 def all_trials(kept_only=True) -> pd.DataFrame:

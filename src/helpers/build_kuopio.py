@@ -1,14 +1,11 @@
-"""Kuopio clips -> synchronised (video keypoints, mocap truth) pairs: data/processed/kuopio_clips.pkl
+"""Sync every Kuopio video clip to its mocap recording -> data/processed/kuopio_clips.pkl
 
-    ./py src/build_kuopio.py --estimate-fps 12     # frame rate from 12 subjects (geometry only)
-    ./py src/build_kuopio.py                       # sync every subject at that frame rate
+    ./py src/helpers/build_kuopio.py [--fps 97]
 
-Never reads force plates for the sync; they are only stored as the gold events.
+The video frame rate is not documented; 97 fps fitted best when estimated from the geometry of 12 subjects.
+The force plates are not used for the sync, so they stay an independent check.
 """
-from __future__ import annotations
-
 import argparse
-import json
 import pickle
 import warnings
 from concurrent.futures import ProcessPoolExecutor
@@ -16,12 +13,11 @@ from pathlib import Path
 
 import numpy as np
 
-import load_kuopio as K
-from canonical import JOINTS, fill_gaps
+from helpers import load_kuopio as K
+from helpers.canonical import JOINTS, fill_gaps
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "data" / "processed" / "kuopio_clips.pkl"
-FPS_FILE = ROOT / "outputs" / "kuopio" / "fps_estimate.json"
 SYNC_IDX = [JOINTS.index(j) for j in K.SYNC_JOINTS]
 J = {n: i for i, n in enumerate(JOINTS)}
 
@@ -49,8 +45,8 @@ def _sync(sub, invalid, fps):
     if len(vids) < 4:
         return sub, None
     clips = {t: (vids[t][0][:, SYNC_IDX], mocs[t]["xyz"][:, SYNC_IDX, 1:3]) for t in vids}
-    fps_, geo, res, diag = K.sync_subject(clips, fps=fps)
-    return sub, (fps_, geo, res, diag, vids, mocs)
+    geo, res = K.sync_subject(clips, fps)
+    return sub, (geo, res, vids, mocs)
 
 
 def records(sub, fps, geo, res, vids, mocs, row) -> list[dict]:
@@ -80,44 +76,23 @@ def records(sub, fps, geo, res, vids, mocs, row) -> list[dict]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--estimate-fps", type=int, default=0, help="estimate the frame rate on this many subjects")
-    ap.add_argument("--fps", type=float, default=0, help="video frame rate (default: the estimate on file)")
+    ap.add_argument("--fps", type=float, default=97.0, help="video frame rate")
     ap.add_argument("--out", default=str(OUT))
-    ap.add_argument("--workers", type=int, default=12)
     a = ap.parse_args()
     info = K.info().set_index("subject")
     subs = [s for s in info.index if (K.RAW / s / "openpose").exists()]
-    inv = {s: K.invalid_trials(info.loc[s]) for s in subs}
-    if a.estimate_fps:
-        subs = subs[:a.estimate_fps]
-        with ProcessPoolExecutor(a.workers) as ex:
-            res = list(ex.map(_sync, subs, [inv[s] for s in subs], [None] * len(subs)))
-        curves = {s: dict(r[3]["fps_costs"]) for s, r in res if r}
-        grid = sorted(next(iter(curves.values())))
-        total = [float(np.mean([c[f] / min(c.values()) for c in curves.values()])) for f in grid]
-        est = {s: float(r[0]) for s, r in res if r}
-        best = grid[int(np.argmin(total))]
-        FPS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        FPS_FILE.write_text(json.dumps({"per_subject": est, "grid": grid, "mean_rel_cost": total, "fps": best}, indent=1))
-        print("per subject", est)
-        print("mean relative cost", dict(zip(grid, np.round(total, 3))))
-        print("best", best)
-        return
-    fps = a.fps or json.loads(FPS_FILE.read_text())["fps"]
-    with ProcessPoolExecutor(a.workers) as ex:
-        res = list(ex.map(_sync, subs, [inv[s] for s in subs], [fps] * len(subs)))
+    with ProcessPoolExecutor(12) as ex:
+        res = list(ex.map(_sync, subs, [K.invalid_trials(info.loc[s]) for s in subs], [a.fps] * len(subs)))
     recs = []
     for s, r in res:
         if r is None:
-            print(s, "skipped (too few usable clips)")
+            print(s, "skipped (no ankle joint centres or too few clips)")
             continue
-        f, geo, sync, diag, vids, mocs = r
-        recs += records(s, f, geo, sync, vids, mocs, info.loc[s].to_dict())
+        geo, sync, vids, mocs = r
+        recs += records(s, a.fps, geo, sync, vids, mocs, info.loc[s].to_dict())
         print(s, len(sync), "clips", f"median sync error {np.median([e for _, e in sync.values()]):.1f} px")
-    out = Path(a.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    pickle.dump(recs, open(out, "wb"))
-    print(len(recs), "clips from", len({r['subject'] for r in recs}), "subjects ->", out)
+    pickle.dump(recs, open(a.out, "wb"))
+    print(len(recs), "clips from", len({r['subject'] for r in recs}), "subjects ->", a.out)
 
 
 if __name__ == "__main__":

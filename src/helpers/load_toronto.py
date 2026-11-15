@@ -1,27 +1,16 @@
-"""Toronto Older Adults Gait Archive -> canonical skeleton (+ 2D pose clips).
-
-Xsens inertial mocap CSV: segment origins in metres, Z-up, 100 Hz, ~60 s of overground
-walking back and forth along a hallway. Segment origins map to joints:
-  Pelvis -> pelvis (mid-hip), *ULeg -> hip, *LLeg -> knee, *Foot -> ankle, *Toe -> toe.
-There is no heel point: a virtual heel is fixed in the foot's sagittal frame, 5 cm behind the
-ankle at floor level in the first (standing calibration) frame.
-
-The recording is split into straight passes (turns removed) — each pass is one "trial".
-
-Pose-tracking CSVs (OpenPose / AlphaPose / Detectron) are 2D COCO keypoints from cameras
-filming the participant walking *towards / away* (frontal plane), 30 fps, no feet keypoints.
+"""Toronto Older Adults gait archive -> our skeleton. Xsens suit (inertial mocap), Z up, 100 Hz, ~60 s walking
+back and forth; split into straight passes. No heel point, so a virtual heel is fixed 5 cm behind the ankle.
+The archive's own video is filmed from the front (no feet keypoints), so it is not used for testing video.
 """
-from __future__ import annotations
-
 import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from canonical import JOINTS, lowpass
+from helpers.canonical import JOINTS, lowpass
 
-ROOT = Path(__file__).resolve().parents[1] / "data" / "toronto_older_adults"
+ROOT = Path(__file__).resolve().parents[2] / "data" / "toronto_older_adults"
 FS = 100.0
 UP = np.array([0.0, 0.0, 1.0])
 HEEL_BACK = 0.05

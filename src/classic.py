@@ -5,12 +5,10 @@ correction used for the labels) -> stride formulas -> window labels. Speed: duri
 stance the foot is fixed on the ground, so its backward velocity relative to the pelvis
 is the walking speed (leg lengths / s).
 """
-from __future__ import annotations
-
 import numpy as np
 
-from canonical import J, SIDES, detect_events, lowpass, sagittal_angles, stride_table
-from gaitdata import EVENTS, FS, IN_IDX, TI, aggregate, strides_to_array
+from helpers.canonical import J, SIDES, detect_events, lowpass, sagittal_angles
+from helpers.gaitdata import ANG_NAMES, EVENTS, FS, IN_IDX, aggregate, strides_from_events
 
 
 def to_sag(x: np.ndarray, vis: np.ndarray) -> np.ndarray:
@@ -54,7 +52,8 @@ def predict(x: np.ndarray, vis: np.ndarray, offsets: dict[str, float]):
     """-> (events in seconds {name: array}, window labels [n_targets])."""
     sag = to_sag(x, vis)
     ev = events(sag, offsets)
-    evi = {k: np.clip(np.round(v).astype(int), 0, len(sag) - 1) for k, v in ev.items()}
-    S = strides_to_array(stride_table(evi, sagittal_angles(sag), FS), FS)
+    evi = {k: np.clip(np.round(v), 0, len(sag) - 1) / FS for k, v in ev.items()}      # whole frames, as before
+    ang = sagittal_angles(sag)
+    S = strides_from_events(evi, np.stack([ang[n] for n in ANG_NAMES], -1))
     y = aggregate(S, 0, (len(sag) - 1) / FS, speed_ll(sag, ev))
     return {k: ev[k] / FS for k in EVENTS}, y

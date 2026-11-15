@@ -4,8 +4,6 @@ Every dataset loader produces `xyz` [T, J, 3] in metres in its lab frame with th
 joint order below, plus the lab's progression and up axes. Everything downstream
 (projection, events, angles, spatiotemporal labels) is shared and lives here.
 """
-from __future__ import annotations
-
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
 from scipy.interpolate import interp1d
@@ -129,63 +127,4 @@ def sagittal_angles(sag: np.ndarray) -> dict[str, np.ndarray]:
         out[f"{s}_hip"] = thigh
         out[f"{s}_knee"] = thigh - shank
         out[f"{s}_ankle"] = foot - shank
-    return out
-
-
-# ---------------------------------------------------------------- per-stride / per-trial labels
-def symmetry_index(l: float, r: float) -> float:
-    """Robinson SI (%): 0 = perfect symmetry."""
-    m = 0.5 * (l + r)
-    return float(100 * (l - r) / m) if m else np.nan
-
-
-def stride_table(ev: dict, angles: dict, fs: float) -> list[dict]:
-    """One row per stride (HS->next HS, same side) with timing and ROM."""
-    rows = []
-    for s in SIDES:
-        o = "R" if s == "L" else "L"
-        hs, to, hs_o, to_o = ev[f"HS_{s}"], ev[f"TO_{s}"], ev[f"HS_{o}"], ev[f"TO_{o}"]
-        for a, b in zip(hs[:-1], hs[1:]):
-            st = (b - a) / fs
-            if not 0.6 < st < 2.5:
-                continue
-            t_off = to[(to > a) & (to < b)]
-            o_hs = hs_o[(hs_o > a) & (hs_o < b)]
-            o_to = to_o[(to_o > a) & (to_o < b)]
-            if len(t_off) != 1 or len(o_hs) != 1 or len(o_to) != 1:
-                continue
-            stance = (t_off[0] - a) / fs
-            ds1 = (o_to[0] - a) / fs                # initial double support
-            ds2 = (t_off[0] - o_hs[0]) / fs         # terminal double support
-            seg = slice(a, b + 1)
-            row = dict(side=s, start=int(a), end=int(b), stride_time=st,
-                       stance_time=stance, swing_time=st - stance,
-                       stance_pct=100 * stance / st,
-                       step_time=(o_hs[0] - a) / fs,   # this HS -> contralateral HS
-                       double_support=ds1 + ds2)
-            for j in ("hip", "knee", "ankle"):
-                ang = angles[f"{s}_{j}"][seg]
-                row[f"{j}_rom"] = float(np.nanmax(ang) - np.nanmin(ang))
-            row["peak_knee_flex"] = float(np.nanmax(angles[f"{s}_knee"][seg]))
-            rows.append(row)
-    return rows
-
-
-def trial_summary(strides: list[dict]) -> dict:
-    """Aggregate per-stride rows into per-trial labels (heads 2, 4, 5, 6)."""
-    import pandas as pd
-    if not strides:
-        return {"n_strides": 0}
-    df = pd.DataFrame(strides)
-    out = {"n_strides": len(df)}
-    out["cadence"] = 120.0 / df.stride_time.mean()  # steps/min
-    for c in ("stride_time", "stance_time", "swing_time", "stance_pct", "double_support",
-              "hip_rom", "knee_rom", "ankle_rom", "peak_knee_flex"):
-        out[c] = df[c].mean()
-    out["stride_time_sd"] = df.stride_time.std()
-    out["stride_time_cv"] = 100 * df.stride_time.std() / df.stride_time.mean()
-    by = df.groupby("side").mean(numeric_only=True)
-    if {"L", "R"} <= set(by.index):
-        for c in ("step_time", "stance_time", "swing_time", "knee_rom", "hip_rom", "ankle_rom"):
-            out[f"SI_{c}"] = symmetry_index(by.loc["L", c], by.loc["R", c])
     return out

@@ -1,30 +1,19 @@
-"""Ferber Running Injury Clinic (walking subset) -> canonical skeleton.
+"""Ferber Running Injury Clinic, walking trials -> our skeleton.
 
-During walking only rigid 4-marker clusters (pelvis, thighs, shanks, feet) + a toe marker
-were recorded; anatomical markers exist only in the neutral standing trial. We follow the
-dataset's own gait_kinematics.m definitions for the static joint centres:
-  hip   = trochanter marker + 25% towards the contralateral one
-  knee  = mid(lat, med epicondyle);  ankle = mid(lat, med malleolus)
-and carry each into the walking trial with a per-frame least-squares rigid fit (Kabsch)
-of its segment cluster (hip->pelvis, knee->thigh, ankle->shank, heel->foot).
-
-Heel has no marker: the foot cluster sits on the shoe heel counter, so heel = the most
-posterior foot-cluster marker dropped to the metatarsal-marker height in the neutral pose.
-~40 % of sessions have no toe/metatarsal markers at all; they get a virtual toe (see
-VIRTUAL_* constants) and are flagged toe_source == "virtual".
-Units mm, Y-up, treadmill.
+Walking trials only have marker clusters (4 markers per segment); the joint centres come from the standing
+calibration trial (hip, knee, ankle as in the dataset's own gait_kinematics.m) and are carried into every walking
+frame by fitting each cluster rigidly (Kabsch). ~40 % of sessions have no toe markers and get a virtual toe.
+Units mm, Y up, treadmill.
 """
-from __future__ import annotations
-
 import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from canonical import JOINTS
+from helpers.canonical import JOINTS
 
-ROOT = Path(__file__).resolve().parents[1] / "data" / "Ferber Running Injury Dataset Full"
+ROOT = Path(__file__).resolve().parents[2] / "data" / "Ferber Running Injury Dataset Full"
 RAW = ROOT / "extracted" / "reformat_data"
 UP = np.array([0.0, 1.0, 0.0])
 # virtual-foot constants, measured on sessions that do have toe + metatarsal markers

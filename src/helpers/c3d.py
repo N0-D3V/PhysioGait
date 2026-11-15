@@ -1,15 +1,6 @@
-"""Minimal C3D reader (Intel byte order, float or int16 storage): point and analog data plus parameters.
-
-nixpkgs has no ezc3d/c3d package, and the format is small enough to read directly:
-512-byte header block, parameter blocks (groups + typed parameters), then interleaved
-frames of [points x (x, y, z, residual)] + [analog samples].
-
-    rec = read("trial.c3d")
-    rec["points"]   [T, P, 3] float (NaN where the residual marks a marker as invalid)
-    rec["labels"]   point labels; rec["rate"]; rec["analog"] [N, C]; rec["analog_labels"]; rec["params"]
+"""Minimal reader for C3D motion-capture files (nixpkgs has no C3D package): marker positions, analog channels
+(force plates) and the parameter section. Intel byte order only, which is what Vicon writes.
 """
-from __future__ import annotations
-
 import numpy as np
 
 _DTYPE = {-1: "S1", 1: "i1", 2: "<i2", 4: "<f4"}

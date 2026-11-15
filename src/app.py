@@ -1,129 +1,88 @@
 """Gradio demo: side-on walking video -> pose -> gait measurements.
 
-    ./py src/app.py            # http://127.0.0.1:7860
-    ./py src/app.py --share    # temporary public link (gradio.live)
+    ./py src/app.py [--share]      # http://127.0.0.1:7860
 
 This project is a prototype and is not medical advice.
 """
-from __future__ import annotations
-
 import argparse
 import os
-import sys
 import tempfile
 from pathlib import Path
 
+import gradio as gr
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).parent))
-import gradio as gr  # noqa: E402
-
-import augment  # noqa: E402
-import render  # noqa: E402
-from analysis import ROOT  # noqa: E402
-from gaitdata import FS, STRIDE_COLS, TARGET_NAMES, TI, aggregate, load_all  # noqa: E402
-from pose_video import PoseTracker  # noqa: E402
-from video_pipeline import LEG_PER_HEIGHT, Analyzer  # noqa: E402
+import augment
+from helpers import render
+from helpers.analysis import ROOT
+from helpers.gaitdata import FS, TARGET_NAMES, TI, aggregate, load_all
+from pose_video import PoseTracker
+from video_pipeline import LEG_PER_HEIGHT, Analyzer
 
 DISCLAIMER = "This project is a prototype and is not medical advice."
 DEMO_DIR = ROOT / "data" / "demo_videos"
 OUT = Path(tempfile.gettempdir()) / "gait_demo"
 OUT.mkdir(exist_ok=True)
-REL = {"good": "✓ good", "rough": "~ rough", "unreliable": "✗ not reliable at this pose quality", "": ""}
-
+RELIABILITY = {"good": "✓ good", "rough": "~ rough", "unreliable": "✗ not reliable at this pose quality", "": ""}
 COLUMNS = ["Measure", "Value", "Unit", "Left", "Right", "Typical error ±", "Reliability", "Healthy adults (5–95th pct)"]
-_state: dict = {}
+_cache = {}   # models are loaded once, on first use
 
 
-def analyzer() -> Analyzer:
-    if "an" not in _state:
-        _state["an"] = Analyzer()
-    return _state["an"]
+def analyzer():
+    if "analyzer" not in _cache:
+        _cache["analyzer"] = Analyzer()
+    return _cache["analyzer"]
 
 
-def tracker() -> PoseTracker:
-    if "tr" not in _state:
-        _state["tr"] = PoseTracker(threads=min(8, os.cpu_count() or 4))
-    return _state["tr"]
-
-
-# ---------------------------------------------------------------- formatting
-def _fmt(v, unit):
+def fmt(v, unit):
     if v is None or not np.isfinite(v):
         return "–"
-    if unit == "s":
-        return f"{v:.3f}"
-    if unit in ("deg", "%", "% of stride", "steps/min"):
-        return f"{v:.1f}"
-    return f"{v:.2f}"
+    return f"{v:.3f}" if unit == "s" else f"{v:.1f}" if unit in ("deg", "%", "% of stride", "steps/min") else f"{v:.2f}"
 
 
-def summary_table(rep, gold: dict | None = None) -> pd.DataFrame:
+def summary_table(rep, gold=None):
     rows = []
     for r in rep.summary.itertuples():
-        row = {"Measure": r.measure, "Value": _fmt(r.value, r.unit), "Unit": r.unit,
-               "Left": _fmt(r.left, r.unit), "Right": _fmt(r.right, r.unit)}
+        row = {"Measure": r.measure, "Value": fmt(r.value, r.unit), "Unit": r.unit, "Left": fmt(r.left, r.unit),
+               "Right": fmt(r.right, r.unit)}
         if gold is not None:
-            row["Gold (mocap)"] = _fmt(gold.get(r.key, np.nan), r.unit)
-        row["Typical error ±"] = _fmt(r.expected_error, r.unit)
-        row["Reliability"] = REL.get(r.reliability, r.reliability)
-        row["Healthy adults (5–95th pct)"] = (f"{_fmt(r.healthy_p5, r.unit)} – {_fmt(r.healthy_p95, r.unit)}"
+            row["Gold (mocap)"] = fmt(gold.get(r.key, np.nan), r.unit)
+        row["Typical error ±"] = fmt(r.expected_error, r.unit)
+        row["Reliability"] = RELIABILITY[r.reliability]
+        row["Healthy adults (5–95th pct)"] = (f"{fmt(r.healthy_p5, r.unit)} – {fmt(r.healthy_p95, r.unit)}"
                                              if np.isfinite(r.healthy_p5) else "–")
         rows.append(row)
     return pd.DataFrame(rows)
 
 
-def quality_md(rep, extra: str = "") -> str:
+def quality_text(rep, extra="", video=False):
     q = rep.quality
-    floor = (f" Keypoint jitter alone suggests σ ≈ {q['sigma_jitter']:.3f}, but video keypoint errors are "
-             f"mostly steady offsets that jitter cannot reveal, so real video is treated as at least "
-             f"σ = {q['sigma_floor']:.2f}." if q.get("sigma_floor") else "")
-    lines = [f"**Pose quality:** assumed noise σ = {q['sigma_equiv']:.3f} leg lengths "
-             f"(evaluation levels: 0 = clean mocap, 0.02 = realistic video pose).{floor} Typical errors and the "
-             f"reliability column are the validated per-recording errors at this level.",
+    lines = [f"**Typical errors** are those measured on held-out people at pose noise σ = {q['sigma']:.2f} leg lengths "
+             f"(0 = perfect motion capture, 0.02 = good video). Real video tested worse than 0.02, so treat them as optimistic.",
              f"**Strides measured:** {q['n_strides_L']} left, {q['n_strides_R']} right. "
              f"Visible keypoints: {100 * q['visible_frac']:.0f} %."]
-    if "passes" in q:
-        lines.append(f"**Walking passes found:** {q['passes']}"
-                     + (" in both directions (each leg measured from the pass where it faces the camera)."
-                        if q["both_directions"] else
-                        " in one direction: the leg further from the camera is partly hidden, so left/right "
-                        "comparisons are less certain. Filming the walk back as well is recommended.")
-                     + (f" Stretches where the pose estimator swapped left and right, corrected: {q['lr_swaps_fixed']}." if q.get("lr_swaps_fixed") else ""))
-    if q.get("hs_alternation_breaks"):
-        lines.append(f"⚠️ **Left/right labelling:** {q['hs_alternation_breaks']} place(s) where two heel strikes of "
-                     "the same foot follow each other; the pose estimator may have confused the legs there.")
+    if video:
+        lines.append(f"**Walking passes:** {q['passes']}" + (" in both directions." if q["both_directions"] else
+                     ". Only one direction was filmed, so the leg further from the camera is partly hidden; "
+                     "filming the walk back as well is recommended."))
+    if q.get("lr_swaps_fixed"):
+        lines.append(f"The pose estimator mixed up the left and right leg in {q['lr_swaps_fixed']} stretch(es); corrected.")
+    if q["hs_alternation_breaks"]:
+        lines.append(f"⚠️ {q['hs_alternation_breaks']} place(s) where the same foot landed twice in a row: the legs may "
+                     "have been confused there.")
     if q["n_strides_L"] + q["n_strides_R"] < 6:
-        lines.append("⚠️ **Few strides**: values are noisy; a clip of ≥ 20 s of steady walking is recommended.")
-    if extra:
-        lines.append(extra)
-    lines.append(f"*{DISCLAIMER}*")
-    return "\n\n".join(lines)
+        lines.append("⚠️ **Few strides**: values are noisy; record at least 20 s of steady walking.")
+    return "\n\n".join(lines + [extra, f"*{DISCLAIMER}*"])
 
 
-def strides_table(rep) -> pd.DataFrame:
-    S = rep.strides.copy()
-    for c in ("start_s", "end_s") + tuple(c for c in STRIDE_COLS if c not in ("stance_pct",)):
-        if c in S:
-            S[c] = S[c].round(3 if c.endswith(("time", "_s", "support")) else 1)
-    S["stance_pct"] = S.stance_pct.round(1)
-    return S
-
-
-def _csv(rep, name: str) -> str:
-    p = OUT / f"{name}_report.csv"
-    rep.summary.drop(columns=["key"]).to_csv(p, index=False)
-    return str(p)
-
-
-# ---------------------------------------------------------------- tab 1: video
 def analyse_video(video, height_cm, leg_cm, conf, max_s, progress=gr.Progress()):
     if not video:
         raise gr.Error("Upload a side-on walking video first (or pick the example below).")
     leg_m = float(leg_cm) / 100 if leg_cm else (LEG_PER_HEIGHT * float(height_cm) / 100 if height_cm else None)
-    progress(0, desc="loading models")
-    kp, score, fps, size, _ = tracker().run(video, max_seconds=float(max_s), progress=progress)
+    if "tracker" not in _cache:
+        _cache["tracker"] = PoseTracker(threads=min(8, os.cpu_count() or 4))
+    kp, score, fps, _, _ = _cache["tracker"].run(video, max_seconds=float(max_s), progress=progress)
     progress(0.9, desc="gait model")
     try:
         rep = analyzer().from_keypoints(kp, score, fps, leg_length_m=leg_m, conf=float(conf))
@@ -132,96 +91,87 @@ def analyse_video(video, height_cm, leg_cm, conf, max_s, progress=gr.Progress())
     progress(0.95, desc="rendering")
     stem = Path(video).stem
     vid = render.annotate_video(video, rep, str(OUT / f"{stem}_annotated.mp4"), max_seconds=float(max_s))
-    note = "" if leg_m else "Walking speed in m/s needs the patient's height or leg length (left column)."
-    return (vid, quality_md(rep, note), summary_table(rep), render.symmetry_plot(rep), render.timeline_plot(rep),
-            render.gait_diagram(rep), render.angle_plot(rep), strides_table(rep), _csv(rep, stem))
+    csv = OUT / f"{stem}_report.csv"
+    rep.summary.drop(columns=["key"]).to_csv(csv, index=False)
+    note = "" if leg_m else "Walking speed in m/s needs the patient's height or leg length."
+    return (vid, quality_text(rep, note, video=True), summary_table(rep), render.symmetry_plot(rep), render.timeline_plot(rep),
+            render.gait_diagram(rep), render.angle_plot(rep), rep.strides.round(3), str(csv))
 
 
-# ---------------------------------------------------------------- tab 2: held-out mocap trial
-def _test_choices():
-    if "choices" in _state:
-        return _state["choices"]
+def test_trials():
+    """A handful of held-out test trials for the demo, spread over how asymmetric they are."""
+    if "trials" in _cache:
+        return _cache["trials"]
     test = load_all()["test"]
-    pick = []
+    picked = []
     for ds, mode, n in (("fukuchi", "treadmill", 4), ("fukuchi", "overground", 2), ("ferber", "treadmill", 5),
                         ("toronto", "overground_pass", 3)):
-        # Fukuchi's two slowest treadmill speeds (T01/T02) have known force-plate event outliers,
-        # so their "gold" asymmetry can be a label artefact: not used as showcase trials
+        # Fukuchi's two slowest treadmill speeds (T01/T02) have known force-plate errors in their labels
         cand = [t for t in test if t.ds == ds and t.mode == mode and len(t.strides) >= 4
                 and not (ds == "fukuchi" and t.trial[-3:] in ("T01", "T02"))]
-        si = np.array([abs(aggregate(t.strides, 0, len(t.pose) / FS)[TI["SI_step_time"]]) for t in cand])
-        order = np.argsort(si)                          # spread over asymmetry, up to the 90th percentile
-        idx = np.unique(np.round(np.linspace(0.3, 0.9, n) * (len(cand) - 1)).astype(int))
-        pick += [cand[order[i]] for i in idx]
+        si = [abs(aggregate(t.strides, 0, len(t.pose) / FS)[TI["SI_step_time"]]) for t in cand]
+        order = np.argsort(si)
+        picked += [cand[order[i]] for i in np.unique(np.round(np.linspace(0.3, 0.9, n) * (len(cand) - 1)).astype(int))]
     labels = {}
-    for t in pick:
-        g = aggregate(t.strides, 0, (len(t.pose) - 1) / FS, t.speed_ll)
+    for t in picked:
+        si = aggregate(t.strides, 0, (len(t.pose) - 1) / FS)[TI["SI_step_time"]]
         labels[f"{t.ds} · {t.mode} · {t.subject} · {t.trial} · {len(t.pose) / FS:.0f} s · "
-               f"{t.speed_ll * t.leg_length:.2f} m/s · step SI {g[TI['SI_step_time']]:+.1f} %"] = t
-    _state["choices"] = labels
+               f"{t.speed_ll * t.leg_length:.2f} m/s · step SI {si:+.1f} %"] = t
+    _cache["trials"] = labels
     return labels
 
 
 def analyse_trial(choice, sigma, progress=gr.Progress()):
     if not choice:
         raise gr.Error("Pick a held-out test trial.")
-    tr = _test_choices()[choice]
-    progress(0.1, desc="noise + gait model")
+    tr = test_trials()[choice]
     x, vis = augment.apply(tr.pose, np.random.default_rng(0), augment.Noise.level(float(sigma)))
-    rep = analyzer().from_canonical(x, vis, [(0, len(x), 1)], leg_length_m=tr.leg_length)
-    T = len(tr.pose)
-    g = aggregate(tr.strides, 0, (T - 1) / FS, tr.speed_ll)
-    gold = {n: g[i] for i, n in enumerate(TARGET_NAMES)} | {"speed_ms": tr.speed_ll * tr.leg_length}
+    rep = analyzer().from_canonical(x, vis, [(0, len(x), 1)], leg_length_m=tr.leg_length, sigma=float(sigma))
+    g = aggregate(tr.strides, 0, (len(tr.pose) - 1) / FS, tr.speed_ll)
+    gold = dict(zip(TARGET_NAMES, g)) | {"speed_ms": tr.speed_ll * tr.leg_length}
     progress(0.6, desc="rendering")
     vid = render.stick_video(rep, str(OUT / f"{tr.trial}_s{sigma}.mp4"))
-    extra = (f"**Input:** motion-capture pose of a held-out subject ({tr.ds}, {tr.subject}), projected to the side "
-             f"view at 30 Hz, with simulated video-pose noise σ = {float(sigma):.2f}. Gold labels: "
-             f"{'force-plate' if tr.event_source == 'grf' else 'bias-corrected Zeni'} events + mocap angles.")
-    return (vid, quality_md(rep, extra), summary_table(rep, gold), render.symmetry_plot(rep),
-            render.gait_diagram(rep), render.angle_plot(rep), strides_table(rep))
+    extra = (f"**Input:** motion-capture pose of a held-out person ({tr.ds}, {tr.subject}) seen from the side, with "
+             f"simulated video-pose noise σ = {float(sigma):.2f}. Gold values: "
+             f"{'force-plate' if tr.event_source == 'grf' else 'marker-based'} events and mocap angles.")
+    return (vid, quality_text(rep, extra), summary_table(rep, gold), render.symmetry_plot(rep), render.gait_diagram(rep),
+            render.angle_plot(rep), rep.strides.round(3))
 
 
-# ---------------------------------------------------------------- layout
 ABOUT = f"""
 ### What it measures
-From a side-on walking clip: **cadence, walking speed, stride / step / stance / swing time, stance %, double
-support, hip / knee / ankle range of motion, peak knee flexion, stride-time variability**, and the **left/right
-symmetry index** of each (Robinson SI = 100 × (L − R) / mean; 0 = symmetric, > 0 = left larger).
+From a side-on walking clip: cadence, walking speed, stride / step / stance / swing time, double support, hip / knee /
+ankle range of motion, peak knee flexion, stride-time variability, and the left/right symmetry index of each
+(100 × (L − R) / mean; 0 = symmetric, > 0 = left larger).
 
 ### How it works
-1. **Pose** (`pose_video.py`): YOLOX person detector + RTMPose-m (Halpe-26 keypoints, incl. heels and toes), ONNX on CPU.
-2. **Canonical input** (`video_pipeline.py`): hips, knees, ankles, heels, toes; left/right label swaps fixed with a
-   motion-continuity Viterbi pass; walking passes split by facing direction; pelvis-centred, leg-length-scaled, 30 Hz.
-3. **Model** (`model.py`, v4): BiGRU encoder → per-frame gait events (heel strike / toe-off) and joint-angle curves
-   (gated: exact geometry where the pose is clean, a learned denoised estimate where it is not).
-4. **Formulas** (`gaitdata.derive`): strides from the events, every output computed with the same definitions as the
-   gold-standard labels; strides pooled over the clip.
-5. **Typical error & reliability**: the clip's keypoint jitter is matched to the evaluation noise levels, and each
-   output shows the error measured on held-out subjects at that level (✗ = no better than guessing the average).
+1. **Pose**: a person detector (YOLOX) and a pose model (RTMPose, with heels and toes) find the joints in every frame.
+2. **Clean-up**: left/right mix-ups are fixed, the clip is split into walking passes, and the body is centred and
+   scaled to leg length.
+3. **Model**: a BiGRU network outputs, for every frame, the chance that a heel lands or a toe lifts, and the hip,
+   knee and ankle angles.
+4. **Formulas**: every number is computed from those events and angles with the same definitions a gait lab uses.
 
-### Validated on (held-out subjects)
-Fukuchi (healthy young and older adults, force plates), Ferber (clinic, walking), Toronto (older adults, never used
-for training) — motion capture with simulated video-pose noise. **Not yet validated on real video against a
-reference system.**
+### Validated on (held-out people)
+Gait-lab recordings with simulated video noise (Fukuchi, Ferber, Toronto older adults), and **real video** (Kuopio,
+42 people, against motion capture and force plates): heel strike ±20 ms, speed ±0.08 m/s, knee range of motion ±6°.
 
 ### Known limits
-- Ankle-ROM symmetry is not measurable at typical video pose quality (flagged ✗).
-- Stance/swing-time asymmetry is under-reported by ~40 %; step-time asymmetry by ~15–25 %.
-- Side view only: no frontal-plane measures (pelvic drop, knee valgus). Treadmill or straight walkway, one person.
-- Walking speed needs the patient's height or leg length; leg length from height uses an average body proportion.
+- Real video is noisier than the σ = 0.02 used for the error column, so those errors are optimistic.
+- Hip- and ankle-motion symmetry were not reliable on real video; knee-motion symmetry was.
+- Stance/swing-time asymmetry is under-reported by ~40 %; step-time asymmetry by ~10–25 %.
+- Side view only (no sideways sway). One person, straight walkway or treadmill.
 
 ### Recording tips
-Camera at hip height, perpendicular to the walking line, whole body including feet in frame, ≥ 20 s of steady
-walking; walk across **and back** so each leg is filmed facing the camera once.
+Camera at hip height, side-on, whole body including feet in frame, ≥ 20 s of steady walking, across and back.
 
-Demo video: *Yoon J, Park H-S, Damiano DL (2012) A novel walking speed estimation scheme and its application to
-treadmill control for gait rehabilitation. J NeuroEng Rehabil 9:62*, CC BY 2.0, via Wikimedia Commons (re-encoded).
+Demo video: Yoon J, Park H-S, Damiano DL (2012), J NeuroEng Rehabil 9:62, CC BY 2.0, via Wikimedia Commons.
 
 **{DISCLAIMER}**
 """
 
 
-def build() -> gr.Blocks:
+def build():
     examples = sorted(DEMO_DIR.glob("*.mp4"))
     with gr.Blocks(title="Gait measurement prototype") as demo:
         gr.Markdown(f"# Gait measurement from a side-on video\nSymmetry, timing and joint range of motion from one "
@@ -230,36 +180,31 @@ def build() -> gr.Blocks:
             with gr.Row():
                 with gr.Column(scale=1):
                     v_in = gr.Video(label="Side-on walking video", sources=["upload"])
-                    height = gr.Number(label="Patient height (cm), for speed in m/s (0 = unknown)", value=None, precision=0)
-                    leg = gr.Number(label="…or measured leg length, hip joint to ankle (cm) (0 = unknown)", value=None,
-                                    precision=0)
+                    height = gr.Number(label="Patient height (cm), for speed in m/s (optional)", precision=0)
+                    leg = gr.Number(label="…or leg length, hip joint to ankle (cm) (optional)", precision=0)
                     with gr.Accordion("Advanced", open=False):
                         conf = gr.Slider(0.1, 0.8, value=0.3, step=0.05, label="Keypoint confidence threshold")
                         max_s = gr.Slider(5, 90, value=60, step=5, label="Analyse at most (seconds)")
                     go = gr.Button("Analyse", variant="primary")
                     if examples:
                         gr.Examples([[str(p), None, None] for p in examples], inputs=[v_in, height, leg],
-                                    label="Example (CC BY 2.0): user-driven treadmill, 0.5 → 1.0 → 1.5 → 1.0 → "
-                                          "0.5 m/s; subject's height unknown, so speed is in leg lengths/s")
+                                    label="Example (CC BY 2.0): treadmill at 0.5 → 1.0 → 1.5 → 1.0 → 0.5 m/s; height "
+                                          "unknown, so speed is in leg lengths/s")
                 with gr.Column(scale=2):
                     v_out = gr.Video(label="Detected pose and gait phase", autoplay=True)
                     q_md = gr.Markdown()
             table = gr.Dataframe(label="Measurements", wrap=True, value=pd.DataFrame(columns=COLUMNS))
-            sym = gr.Plot(label="Left vs right")
-            tline = gr.Plot(label="Over the recording")
-            diag = gr.Plot(label="Gait diagram")
-            ang = gr.Plot(label="Joint angles")
+            plots = [gr.Plot(label=t) for t in ("Left vs right", "Over the recording", "Gait diagram", "Joint angles")]
             with gr.Accordion("Per-stride values (the strides behind every number)", open=False):
                 strides = gr.Dataframe()
             csv = gr.File(label="Download measurements (CSV)")
-            go.click(analyse_video, [v_in, height, leg, conf, max_s], [v_out, q_md, table, sym, tline, diag, ang, strides, csv])
+            go.click(analyse_video, [v_in, height, leg, conf, max_s], [v_out, q_md, table, *plots, strides, csv])
 
         with gr.Tab("Held-out test trial (mocap)"):
-            gr.Markdown("Canned input: a trial from a subject the model never saw, as side-view pose from motion "
-                        "capture, with optional simulated video-pose noise; the gold-standard values are shown next "
-                        "to the model's.")
+            gr.Markdown("A trial from a person the model never saw, as side-view pose from motion capture with "
+                        "optional simulated video noise; the gold-standard values are shown next to the model's.")
             with gr.Row():
-                pick = gr.Dropdown(choices=list(_test_choices()), label="Held-out trial", scale=3)
+                pick = gr.Dropdown(choices=list(test_trials()), label="Held-out trial", scale=3)
                 sig = gr.Slider(0, 0.04, value=0.02, step=0.01, label="Simulated pose noise σ (leg lengths)", scale=1)
                 go2 = gr.Button("Run", variant="primary", scale=1)
             with gr.Row():
@@ -267,12 +212,10 @@ def build() -> gr.Blocks:
                 t_md = gr.Markdown()
             t_table = gr.Dataframe(label="Model vs gold standard", wrap=True,
                                    value=pd.DataFrame(columns=COLUMNS[:5] + ["Gold (mocap)"] + COLUMNS[5:]))
-            t_sym = gr.Plot()
-            t_diag = gr.Plot()
-            t_ang = gr.Plot()
+            t_plots = [gr.Plot() for _ in range(3)]
             with gr.Accordion("Per-stride values", open=False):
                 t_str = gr.Dataframe()
-            go2.click(analyse_trial, [pick, sig], [t_vid, t_md, t_table, t_sym, t_diag, t_ang, t_str])
+            go2.click(analyse_trial, [pick, sig], [t_vid, t_md, t_table, *t_plots, t_str])
 
         with gr.Tab("How it works & limits"):
             gr.Markdown(ABOUT)
@@ -284,5 +227,4 @@ if __name__ == "__main__":
     ap.add_argument("--share", action="store_true")
     ap.add_argument("--port", type=int, default=7860)
     a = ap.parse_args()
-    build().queue().launch(server_port=a.port, share=a.share, allowed_paths=[str(OUT), str(DEMO_DIR)],
-                           show_error=True)
+    build().queue().launch(server_port=a.port, share=a.share, allowed_paths=[str(OUT), str(DEMO_DIR)], show_error=True)

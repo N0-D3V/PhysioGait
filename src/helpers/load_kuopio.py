@@ -1,25 +1,10 @@
-"""Kuopio gait dataset (Zenodo 10559504, CC BY 4.0): real sagittal video keypoints next to motion capture.
+"""Kuopio gait dataset (Zenodo 10559504): real side-view video keypoints (OpenPose) recorded together with
+motion capture and force plates. Used only to test the model on real video.
 
-Used only for validation (no training). Per subject: 10 + 10 overground walking trials at comfortable
-speed; `r_*` trials walk towards mocap -Y with the right leg nearest the camera and the right foot on
-the middle force plate, `l_*` trials walk back (left leg near, left foot on the plate). So each
-subject is recorded with exactly the "across and back" protocol the demo recommends.
-
-Mocap (Vicon, 100 Hz, mm, Z up): functional joint centres are exported as virtual markers
-  hip   = Pelvis_{L,R}Femur_score   knee = {L,R}Knee (SCoRE)   ankle = {L,R}Tibia_{L,R}Foot_score
-  heel  = {L,R}Foot1 (posterior foot marker)   toe = mean({L,R}Foot2, {L,R}Foot3) (forefoot)
-  pelvis origin = mid-hip (as the video pipeline uses)
-Force plates 1-3 (floor, 1 kHz) give gold heel strikes / toe-offs for the steps that land on them.
-
-Video: OpenPose BODY_25 json per frame, ~1.05 s clips around the middle-plate stance. The dataset gives
-neither the video frame rate nor the clip start time, so `sync_subject` estimates both from geometry
-only: a fixed side camera (one pinhole-free similarity per subject: px = s * -Y + bx, py = s * -Z + by),
-shared by all the subject's trials, and one start time per trial, minimising the median left/right-
-labelled joint distance (hip, knee, ankle). Force plates are not used, so they remain an independent
-check of the sync.
+Per subject: 10 + 10 walks at comfortable speed, `r_*` walking one way (right leg nearest the camera) and `l_*`
+back. Mocap joint centres are Vicon's functional joint-centre markers; heel = rear foot marker, toe = mean of
+the two forefoot markers. Video clips are ~1 s around the step on the middle force plate.
 """
-from __future__ import annotations
-
 import json
 import re
 from pathlib import Path
@@ -27,10 +12,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import c3d
-from canonical import JOINTS
+from helpers import c3d
+from helpers.canonical import JOINTS
 
-ROOT = Path(__file__).resolve().parents[1] / "data" / "kuopio"
+ROOT = Path(__file__).resolve().parents[2] / "data" / "kuopio"
 RAW = ROOT / "raw"
 FS_MOCAP = 100.0
 PLATES = (1, 2, 3)                      # floor plates along the walkway (4, 5 are not in the walkway)
@@ -145,7 +130,8 @@ def sagittal(xyz: np.ndarray, direction: int) -> np.ndarray:
 def _interp(M: np.ndarray, idx: np.ndarray) -> np.ndarray:
     T = len(M)
     flat = M.reshape(T, -1)
-    out = np.stack([np.interp(idx, np.arange(T), flat[:, c], left=np.nan, right=np.nan) for c in range(flat.shape[1])], 1)
+    t = np.arange(T)
+    out = np.stack([np.interp(idx, t, flat[:, c], left=np.nan, right=np.nan) for c in range(flat.shape[1])], 1)
     return out.reshape((len(idx),) + M.shape[1:])
 
 
@@ -191,40 +177,29 @@ def _fit_geo(pairs, fps, t0s):
     return np.linalg.lstsq(A[keep], b[keep], rcond=None)[0]
 
 
-def sync_subject(clips: dict[str, tuple[np.ndarray, np.ndarray]], fps: float | None = None,
-                 fps_grid=np.arange(84, 106.1, 1.0)):
-    """clips: trial -> (video keypoints [n, 6, 2] px for SYNC_JOINTS, mocap [T, 6, 2] lab (Y, Z) m).
+def sync_subject(clips, fps):
+    """Find where each video clip sits in its mocap recording, using geometry only.
 
-    fps: known video frame rate; None estimates it (shallow optimum: it trades off against the
-    camera scale, so `build_kuopio` estimates it on several subjects and then fixes it).
-    Returns (fps, geo, {trial: (t0 s, median px error)}, diagnostics)."""
+    clips: trial -> (video hip/knee/ankle keypoints [n, 6, 2] in pixels, mocap joints [T, 6, 2] as lab (Y, Z) in m).
+    One fixed side camera per subject (pixels = scale * -lab + offset, shared by all its trials) and one start
+    time per clip, chosen so the left/right-labelled keypoints sit on the projected mocap joints.
+    Returns (camera (scale, x offset, y offset), {trial: (start time s, median error px)}).
+    """
     pairs = list(clips.values())
-    # 1. coarse: scan the horizontal camera offset with a typical scale; vertical offset from the hips
+    # rough camera: typical scale, vertical offset from the hips, horizontal offset by scanning
     V0, M0 = pairs[0]
-    s0 = 330.0
-    by0 = float(np.nanmedian(V0[:, :2, 1]) + s0 * np.nanmedian(M0[:, :2, 1]))
-    best = (np.inf,)
-    for f in ((98.0, 100.0, 102.0) if fps is None else (fps,)):
-        for bx in np.arange(-400, 1600, 30):
-            c = np.median([_best_t0(V, M, f, (s0, bx, by0), 0.02)[0] for V, M in pairs[:6]])
-            if c < best[0]:
-                best = (c, f, bx)
-    _, f0, bx = best
-    geo = np.array([s0, bx, by0])
-    # 2. alternate start times and shared geometry
-    for _ in range(3):
-        t0s = [_best_t0(V, M, f0, geo, 0.01)[1] for V, M in pairs]
-        geo = _fit_geo(pairs, f0, t0s)
-    # 3. frame rate (shared), then fine start times
-    costs = []
-    for f in (fps_grid if fps is None else [fps]):
-        t0s = [_best_t0(V, M, f, geo, 0.01)[1] for V, M in pairs]
-        g = _fit_geo(pairs, f, t0s)
-        costs.append((np.median([_best_t0(V, M, f, g, 0.01, t)[0] for (V, M), t in zip(pairs, t0s)]), f, g))
-    _, fps, geo = min(costs, key=lambda c: c[0])
+    scale = 330.0
+    by = float(np.nanmedian(V0[:, :2, 1]) + scale * np.nanmedian(M0[:, :2, 1]))
+    cost = {bx: np.median([_best_t0(V, M, fps, (scale, bx, by), 0.02)[0] for V, M in pairs[:6]])
+            for bx in np.arange(-400, 1600, 30)}
+    geo = np.array([scale, min(cost, key=cost.get), by])
+    # refine: alternate start times and the shared camera
+    for _ in range(4):
+        t0s = [_best_t0(V, M, fps, geo, 0.01)[1] for V, M in pairs]
+        geo = _fit_geo(pairs, fps, t0s)
     out = {}
     for name, (V, M) in clips.items():
         _, t = _best_t0(V, M, fps, geo, 0.01)
         e, t = _best_t0(V, M, fps, geo, 0.01, around=t)
         out[name] = (t, e)
-    return float(fps), geo, out, {"coarse_cost": best[0], "fps_costs": [(float(f), float(c)) for c, f, _ in costs]}
+    return geo, out

@@ -1,17 +1,12 @@
 """Figure for the Kuopio real-video validation: outputs/figures/07_kuopio.png
 
-    ./py src/plot_kuopio.py        (after evaluate_kuopio.py)
+    ./py src/helpers/plot_kuopio.py        (after evaluate_kuopio.py)
 """
-from __future__ import annotations
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import pandas as pd  # noqa: E402
-
-from analysis import INK2, MUTED, ROOT, SIDE_COL, style  # noqa: E402
+from helpers.analysis import INK2, MUTED, ROOT, SIDE_COL, style
 
 K = ROOT / "outputs" / "kuopio"
 FIG = ROOT / "outputs" / "figures"
@@ -39,7 +34,7 @@ def main():
     a.set_title("Keypoint error: real OpenPose vs mocap")
     a.legend(fontsize=7, loc="upper left")
     # 2. heel-strike timing error vs force plates
-    E = pd.read_parquet(K / "events_raw.parquet")
+    E = pd.read_parquet(K / "events.parquet")
     a = ax[0, 1]
     bins = np.arange(-120, 121, 8)
     for cond in ("mocap", "real"):
@@ -67,9 +62,9 @@ def main():
     SI = pd.read_csv(K / "rom_si.csv")
     a = ax[1, 0]
     for cond in ("sim0.02", "real"):
-        d = SI[(SI.condition == cond) & (SI.method == "model") & (SI.joint == "knee")]
-        r = np.corrcoef(d.true_si_all, d.pred_si_all)[0, 1]
-        a.scatter(d.true_si_all, d.pred_si_all, s=18, color=COL[cond], label=f"{LAB[cond]}: r {r:.2f}")
+        d = SI[(SI.condition == cond) & (SI.method == "model") & (SI.joint == "knee") & (SI.protocol == "all")]
+        r = np.corrcoef(d.true_si, d.pred_si)[0, 1]
+        a.scatter(d.true_si, d.pred_si, s=18, color=COL[cond], label=f"{LAB[cond]}: r {r:.2f}")
     a.plot([-15, 15], [-15, 15], color=INK2, lw=1)
     a.set_xlabel("mocap knee-ROM SI (%)"), a.set_ylabel("predicted (%)")
     a.set_title("Knee-ROM symmetry per subject (42 subjects)")

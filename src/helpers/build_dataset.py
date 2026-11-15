@@ -1,18 +1,10 @@
-"""Build the processed, filtered, canonical dataset for all sources.
+"""Build the processed dataset: each trial -> our skeleton, side view, 30 Hz, events, labels, quality checks.
 
-    ./py src/build_dataset.py [fukuchi|ferber|toronto ...] [--limit N] [--workers K]
+    ./py src/helpers/build_dataset.py [fukuchi ferber toronto] [--limit N] [--workers K]
 
-Writes to data/processed/<dataset>/:
-    trials.parquet   one row per trial: metadata + QC + per-trial labels + keep/reject_reason
-    strides.parquet  one row per stride (timing, ROM) for kept trials
-    npz/<trial>.npz  xyz (native fs, lab frame, m), sag30 (pelvis-centred, leg-length-scaled,
-                     30 Hz), ang30 (6 sagittal angles), pelvis_fwd30, events (native + 30 Hz)
+Writes data/processed/<dataset>/{trials.parquet, strides.parquet, npz/<trial>.npz}.
 """
-from __future__ import annotations
-
 import argparse
-import sys
-import traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -20,13 +12,11 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).parent))
-from canonical import (J, JOINTS, SIDES, TARGET_FS, detect_events, lowpass, normalise,  # noqa: E402
-                       progression_axis_pca, resample, sagittal_angles, sagittal_project,
-                       stride_table, trial_summary)
+from helpers.canonical import (J, TARGET_FS, detect_events, lowpass, normalise, progression_axis_pca, resample,
+                       sagittal_angles, sagittal_project)
+from helpers.gaitdata import ANG_NAMES, SIDES, STRIDE_COLS, TARGET_NAMES, TI, aggregate, strides_from_events
 
-OUT = Path(__file__).resolve().parents[1] / "data" / "processed"
-ANG_NAMES = [f"{s}_{j}" for s in SIDES for j in ("hip", "knee", "ankle")]
+OUT = Path(__file__).resolve().parents[2] / "data" / "processed"
 
 # ---- QC thresholds (filtering) --------------------------------------------------------
 QC = dict(
@@ -84,8 +74,12 @@ def process(rec: dict, mode: str) -> tuple[dict, list[dict], dict]:
     ev = detect_events(sag, fs)
     use = gold if gold else ev
     row["event_source"] = "grf" if gold else "zeni"
-    strides = stride_table(use, ang, fs)
-    row |= trial_summary(strides)
+    S = strides_from_events({k: np.asarray(v) / fs for k, v in use.items()},
+                            np.stack([ang[n] for n in ANG_NAMES], -1), fs)
+    y = aggregate(S, -np.inf, np.inf)                       # per-trial labels, same formulas as the model's
+    row |= {"n_strides": len(S)} | {n: y[TI[n]] for n in TARGET_NAMES if n != "speed_ll"}
+    strides = [dict(side=SIDES[int(r[2])], start=int(round(r[0] * fs)), end=int(round(r[1] * fs)),
+                    **dict(zip(STRIDE_COLS, r[3:]))) for r in S]
     if gold:  # coordinate-based vs force-plate timing error (ms)
         for k in ev:
             g, e = gold[k], ev[k]
@@ -129,10 +123,10 @@ def _run_one(args):
     ds, meta = args
     try:
         if ds == "fukuchi":
-            import load_fukuchi as L
+            from helpers import load_fukuchi as L
             rec = L.load_trial(pd.Series(meta))
         elif ds == "ferber":
-            import load_ferber as L
+            from helpers import load_ferber as L
             rec = L.load_trial(pd.Series(meta))
             meta["max_cluster_rms_mm"] = max(v for k, v in rec.items() if k.startswith("rms_"))
             meta["toe_source"] = rec["toe_source"]
@@ -164,12 +158,12 @@ def build(ds: str, limit: int | None, workers: int):
     if ds == "toronto":
         return build_toronto(out)
     if ds == "fukuchi":
-        import load_fukuchi as L
+        from helpers import load_fukuchi as L
         meta = L.info()
         cols = ["subject", "trial", "FileName", "mode", "speed", "speed_label", "age", "age_group",
                 "sex", "height_cm", "mass_kg", "leg_length_m"]
     else:
-        import load_ferber as L
+        from helpers import load_ferber as L
         meta = L.info()
         meta["mode"] = "treadmill"
         meta = meta[meta.path.map(Path.exists)]
@@ -195,7 +189,7 @@ def build(ds: str, limit: int | None, workers: int):
 
 
 def build_toronto(out: Path):
-    import load_toronto as L
+    from helpers import load_toronto as L
     info = L.info().set_index("pid")
     rows, all_strides = [], []
     for pid in info.index:

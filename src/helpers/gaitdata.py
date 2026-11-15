@@ -1,15 +1,8 @@
-"""Model data: subject-level splits, per-trial arrays, X-second windows and their labels.
+"""Model data: subject-level splits, trials as 30 Hz arrays, 5 s windows and their labels, and the stride
+formulas that turn heel strikes, toe-offs and joint angles into every reported number.
 
-Input  = canonical 2D pose at 30 Hz (pelvis-centred, leg-length-scaled), pelvis dropped
-         because it is the origin. Labels are recomputed *per window* from the gold events
-         (force plates where available, else Zeni) and mocap angles, so a 5 s window is
-         labelled with exactly the strides it contains.
-
-Speed is predicted in leg lengths per second (`speed_ll`): the input is scale-free, so
-metres per second need the patient's leg length (which a physio can measure).
+Speed is in leg lengths per second: the input is scaled by leg length, so m/s needs the person's leg length.
 """
-from __future__ import annotations
-
 import pickle
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -17,8 +10,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from analysis import PROC, trials as load_trials
-from canonical import JOINTS, SIDES, TARGET_FS, stride_table
+from helpers.analysis import PROC, trials as load_trials
+from helpers.canonical import JOINTS, SIDES, TARGET_FS
 
 FS = TARGET_FS
 IN_JOINTS = [j for j in JOINTS if j != "pelvis"]
@@ -102,12 +95,6 @@ class Trial:
     ev_soft: np.ndarray = field(default=None, repr=False)  # [T, 4] Gaussian event targets
 
 
-def strides_to_array(rows: list[dict], fs: float) -> np.ndarray:
-    a = [[r["start"] / fs, r["end"] / fs, SIDES.index(r["side"])] + [r[c] for c in STRIDE_COLS]
-         for r in rows]
-    return np.array(a, float).reshape(-1, 3 + len(STRIDE_COLS))
-
-
 def soft_events(events_s: dict, T: int, sigma: float = 1.0) -> np.ndarray:
     t = np.arange(T)[:, None]
     out = np.zeros((T, len(EVENTS)), np.float32)
@@ -131,10 +118,9 @@ def _load(args) -> Trial | None:
     # angles back on the native grid so stride ROM uses the native-rate event frames
     t30 = np.arange(len(ang30)) / FS
     tn = np.arange(int(t30[-1] * fs) + 1) / fs
-    ang = {n: np.interp(tn, t30, ang30[:, i]) for i, n in enumerate(ANG_NAMES)}
-    ev = {k: v[(v >= 0) & (v < len(tn))] for k, v in ev.items()}
-    S = strides_to_array(stride_table(ev, ang, fs), fs)
-    events_s = {k: v / fs for k, v in ev.items()}
+    ang = np.stack([np.interp(tn, t30, ang30[:, i]) for i in range(len(ANG_NAMES))], -1)
+    events_s = {k: v[(v >= 0) & (v < len(tn))] / fs for k, v in ev.items()}
+    S = strides_from_events(events_s, ang, fs)
     tr = Trial(ds, row["trial"], row["subject"], row["mode"], sag30[:, IN_IDX].astype(np.float32),
                events_s, S, float(row["speed"]) / float(row["leg_length_sag"]),
                float(row["leg_length_sag"]), "grf" if gold else "zeni", ang30.astype(np.float32))
@@ -193,10 +179,13 @@ def aggregate(S: np.ndarray, t0: float, t1: float, speed_ll: float = np.nan) -> 
     return y
 
 
-def strides_from_events(ev_s: dict[str, np.ndarray], ang: np.ndarray | None) -> np.ndarray:
-    """Stride table from (predicted) event times in seconds and 30 Hz angle curves [T, 6].
+def strides_from_events(ev_s: dict[str, np.ndarray], ang: np.ndarray | None, fs: float = FS) -> np.ndarray:
+    """The one stride definition, used for the labels, the classic baseline and the model.
 
-    Same definitions as canonical.stride_table, but with sub-frame event times.
+    ev_s: event times (s); ang: [T, 6] angle curves (ANG_NAMES order) sampled at `fs`, or None.
+    A stride is heel strike -> next heel strike of the same foot (0.6-2.5 s) containing exactly one
+    own toe-off and one contralateral heel strike and toe-off. Returns [S, 3 + len(STRIDE_COLS)]:
+    start_s, end_s, side (0 = L, 1 = R), then STRIDE_COLS (ROM columns NaN without angles).
     """
     rows = []
     for si, s in enumerate(SIDES):
@@ -211,15 +200,15 @@ def strides_from_events(ev_s: dict[str, np.ndarray], ang: np.ndarray | None) -> 
             if len(t_off) != 1 or len(o_hs) != 1 or len(o_to) != 1:
                 continue
             stance = t_off[0] - a
-            row = [a, b, si, st, o_hs[0] - a, stance, st - stance, 100 * stance / st,
-                   (o_to[0] - a) + (t_off[0] - o_hs[0])]
-            if ang is not None:
-                seg = ang[max(0, int(round(a * FS))):int(round(b * FS)) + 1, 3 * si:3 * si + 3]
+            double_support = (o_to[0] - a) + (t_off[0] - o_hs[0])       # initial + terminal
+            row = [a, b, si, st, o_hs[0] - a, stance, st - stance, 100 * stance / st, double_support]
+            if ang is None:
+                row += [np.nan] * 4
+            else:
+                seg = ang[max(0, int(round(a * fs))):int(round(b * fs)) + 1, 3 * si:3 * si + 3]
                 if len(seg) < 2:
                     continue
-                row += list(seg.max(0) - seg.min(0)) + [seg[:, 1].max()]
-            else:
-                row += [np.nan] * 4
+                row += list(np.nanmax(seg, 0) - np.nanmin(seg, 0)) + [np.nanmax(seg[:, 1])]
             rows.append(row)
     return np.array(rows, float).reshape(-1, 3 + len(STRIDE_COLS))
 

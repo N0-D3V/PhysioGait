@@ -1,14 +1,8 @@
-"""Video -> 2D keypoints: YOLOX person detector + RTMPose (Halpe-26, has heels and toes), ONNX on CPU.
+"""Video -> 2D keypoints: YOLOX person detector + RTMPose (Halpe-26 keypoints, incl. heels and toes), ONNX on CPU.
+The two models (~150 MB, OpenMMLab) are downloaded into outputs/pose_models/ on first use.
 
-Models (downloaded once into outputs/pose_models/, see MODELS):
-  yolox-m-humanart.onnx    person boxes; mmdeploy end2end export with NMS inside
-  rtmpose-m-halpe26.onnx   26 keypoints incl. big toe, small toe and heel per foot (SimCC head)
-
-    from pose_video import PoseTracker
-    kp, score, fps, size = PoseTracker().run("walk.mp4")   # kp [T, 26, 2] pixels, score [T, 26]
+    kp, score, fps, size, boxes = PoseTracker().run("walk.mp4")    # kp [T, 26, 2] pixels
 """
-from __future__ import annotations
-
 import io
 import urllib.request
 import zipfile

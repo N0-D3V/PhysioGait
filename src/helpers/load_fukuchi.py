@@ -1,27 +1,15 @@
-"""Fukuchi 2018 WBDS -> canonical skeleton.
-
-Markers (Leardini-style, ASCII export): mm, Y-up, 150 Hz. Treadmill trials T01..T08
-(30 s, fixed belt along lab X) and overground trials O01..O23 x {S,C,F} (~2.5 s).
-
-Joint centres
-  pelvis  = mean(ASIS L/R, PSIS L/R)
-  hip     = Harrington 2007 regression from pelvis width / depth
-  knee    = lateral femoral epicondyle (R.Knee) — medial marker only exists in static;
-            its medio-lateral offset is discarded by the sagittal projection anyway.
-  ankle   = lateral malleolus (same argument)
-  heel    = Heel; toe = mean(MT1, MT5)
+"""Fukuchi 2018 walking dataset (WBDS) -> our skeleton. Markers in mm, Y up, 150 Hz; treadmill trials T01-T08
+and short overground trials. Hip joint centres by the Harrington regression; heel/toe from foot markers;
+treadmill force plates give the gold heel strikes and toe-offs.
 """
-from __future__ import annotations
-
-import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from canonical import JOINTS, fill_gaps
+from helpers.canonical import JOINTS, fill_gaps
 
-ROOT = Path(__file__).resolve().parents[1] / "data" / "fukuchi_wbds"
+ROOT = Path(__file__).resolve().parents[2] / "data" / "fukuchi_wbds"
 ASCII = ROOT / "51subjs"
 FS = 150.0
 FS_GRF = 300.0

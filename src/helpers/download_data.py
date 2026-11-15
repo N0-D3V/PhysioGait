@@ -1,21 +1,11 @@
-"""Download the four datasets, each into its own directory under data/ (run from the repo root).
+"""Download the four datasets into data/<dataset>/ (run from the repo root).
 
-    ./py src/download_data.py fukuchi toronto ferber kuopio      # or any subset; default: all
+    ./py src/helpers/download_data.py [fukuchi toronto ferber kuopio]
 
-| dataset  | directory                                  | download | on disk  |
-|----------|--------------------------------------------|----------|----------|
-| fukuchi  | data/fukuchi_wbds/                         | ~0.4 GB  | ~2 GB    |
-| toronto  | data/toronto_older_adults/                 | ~70 MB   | ~0.3 GB  |
-| ferber   | data/Ferber Running Injury Dataset Full/   | 22.8 GB  | ~70 GB   |
-| kuopio   | data/kuopio/  (comfortable-speed trials)   | ~0.5 GB  | ~1.2 GB  |
-
-Ferber's ric_data.zip uses Deflate64, which Python's zipfile cannot read: it is extracted with 7-Zip
-(`7zz`, in the flake dev shell). Kuopio is 23 GB of zips, mostly raw camera files; only the OpenPose
-json and the walking-trial .c3d files are read out of the remote zips with HTTP range requests.
-Archives are only listed/extracted by this script, never executed.
+Ferber's zip (22.8 GB) uses Deflate64, so it is extracted with 7-Zip (in the dev shell). Kuopio's zips are 23 GB,
+mostly raw camera files, so only the walking trials and their OpenPose files are read out of them over HTTP.
+Zips are deleted after extraction; datasets already present are skipped.
 """
-from __future__ import annotations
-
 import io
 import re
 import shutil
@@ -27,22 +17,25 @@ import zipfile
 import zlib
 from pathlib import Path
 
-DATA = Path(__file__).resolve().parents[1] / "data"
+DATA = Path(__file__).resolve().parents[2] / "data"
 FIG = "https://ndownloader.figshare.com/files/"
 ZEN = "https://zenodo.org/records/10559504/files/"
 
-FILES = {
-    "fukuchi": ("fukuchi_wbds", {"WBDSinfo.csv": FIG + "68504641", "WBDSascii.zip": FIG + "68194516"}),
-    "toronto": ("toronto_older_adults", {"Participants.xlsx": FIG + "35454230", "Xsens.zip": FIG + "35454227",
-                                         "PoseTracking.zip": FIG + "28868364"}),
+FILES = {     # dataset -> (directory, plain files)
+    "fukuchi": ("fukuchi_wbds", {"WBDSinfo.csv": FIG + "68504641"}),
+    "toronto": ("toronto_older_adults", {"Participants.xlsx": FIG + "35454230"}),
     "ferber": ("Ferber Running Injury Dataset Full", {"README.txt": FIG + "43420746",
-                                                      "walk_data_meta.csv": FIG + "42922405",
-                                                      "ric_data.zip": FIG + "42651352"}),
+                                                      "walk_data_meta.csv": FIG + "42922405"}),
     "kuopio": ("kuopio", {"readme.txt": ZEN + "readme.txt?download=1",
                           "info_participants.xlsx": ZEN + "info_participants.xlsx?download=1"}),
 }
+ARCHIVES = {  # dataset -> [(zip, url, directory it extracts to)]; the zip is deleted once extracted
+    "fukuchi": [("WBDSascii.zip", FIG + "68194516", "51subjs")],
+    "toronto": [("Xsens.zip", FIG + "35454227", "Xsens"), ("PoseTracking.zip", FIG + "28868364", "Pose Tracking")],
+    "ferber": [("ric_data.zip", FIG + "42651352", "extracted/reformat_data")],
+}
 KUOPIO_ZIPS = ["measurement_data_1_to_17.zip", "measurement_data_18_to_34.zip", "measurement_data_35_to_51.zip"]
-KUOPIO_KEEP = re.compile(r"^\d\d/(mocap/([lr]_comf_\d\d|calib_static)\.c3d|openpose/json_[lr]_comf_\d\d/)")
+KUOPIO_KEEP = re.compile(r"^\d\d/(mocap/[lr]_comf_\d\d\.c3d|openpose/json_[lr]_comf_\d\d/)")
 
 
 def fetch(url: str, dest: Path) -> None:
@@ -143,18 +136,18 @@ def main(names: list[str]) -> None:
         print(f"{name} -> {d}")
         for fn, url in files.items():
             fetch(url, d / fn)
-        if name == "fukuchi" and not (d / "51subjs").exists():
-            extract(d / "WBDSascii.zip", d)
-        if name == "toronto":
-            if not (d / "Xsens").exists():
-                extract(d / "Xsens.zip", d)
-            if not (d / "Pose Tracking").exists():
-                extract(d / "PoseTracking.zip", d)
-        if name == "ferber" and not (d / "extracted" / "reformat_data").exists():
-            exe = shutil.which("7zz") or shutil.which("7z")
-            if not exe:
-                sys.exit("ferber: needs 7-Zip (7zz) for Deflate64; run inside `nix develop`")
-            subprocess.run([exe, "x", "-y", f"-o{d / 'extracted'}", str(d / "ric_data.zip")], check=True)
+        for zname, url, target in ARCHIVES.get(name, []):
+            if (d / target).exists():
+                continue
+            fetch(url, d / zname)
+            if name == "ferber":                         # Deflate64: Python's zipfile cannot read it
+                exe = shutil.which("7zz") or shutil.which("7z")
+                if not exe:
+                    sys.exit("ferber: needs 7-Zip (7zz) for Deflate64; run inside `nix develop`")
+                subprocess.run([exe, "x", "-y", f"-o{d / 'extracted'}", str(d / zname)], check=True)
+            else:
+                extract(d / zname, d)
+            (d / zname).unlink()
         if name == "kuopio":
             for zname in KUOPIO_ZIPS:
                 print(f"  {zname} (remote, selected members)")
