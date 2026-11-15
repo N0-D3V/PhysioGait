@@ -1,0 +1,50 @@
+# Non-Nix environment. Mirrors the Python packages in flake.nix; lower bounds are the major versions
+# the flake was tested with. System tools still needed: ffmpeg (demo video) and 7-Zip (Ferber data).
+[project]
+name = "gaitanalysis"
+version = "0.1.0"
+description = "Gait analysis prototype: data pipeline, model, notebooks and Gradio demo"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # pipeline
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "pandas>=2.2",
+    "pyarrow>=15",
+    "openpyxl>=3.1", # Toronto Participants.xlsx
+    "tqdm>=4.66",
+    # model
+    "torch>=2.4",
+    # video -> pose -> inference demo
+    "opencv-python-headless>=4.9",
+    "onnxruntime>=1.18",
+    "gradio>=6",
+    # notebooks
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+notebooks = [
+    "nbformat>=5.10",
+    "nbconvert>=7.16",
+    "ipykernel>=6.29",
+    "ipywidgets>=8.1",
+    "jupyterlab>=4.2",
+]
+
+# Installs src/ (the scripts and helpers/) in editable mode, so `import helpers.<module>` works
+# without setting PYTHONPATH, same as ./py does.
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = [
+    "app", "augment", "classic", "evaluate", "evaluate_kuopio", "evaluate_trials",
+    "model", "pose_video", "train", "video_pipeline",
+]
