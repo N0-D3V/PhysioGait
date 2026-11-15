@@ -10,9 +10,9 @@ Everything runs on CPU, from the repo root, inside the Nix flake. No step runs c
 | | |
 |---|---|
 | OS | Linux or macOS with [Nix](https://nixos.org/download) and flakes enabled (`experimental-features = nix-command flakes`) |
-| Disk | ~75 GB for everything (Ferber alone: 22.8 GB zip + 45 GB extracted). Without Ferber: ~5 GB |
+| Disk | ~52 GB once built (Ferber: 45 GB extracted, plus 22.8 GB for its zip during the download, deleted after extraction). Without Ferber: ~8 GB |
 | CPU / RAM | any multi-core CPU, 16 GB RAM. No GPU needed |
-| Time | ~1 h downloads (Ferber dominates), ~1 h dataset build, ~2.6 h training, ~1 h evaluation |
+| Time | ~1 h downloads (Ferber dominates), ~1 h dataset build, ~2.6 h training, ~1 h evaluation (Kuopio: minutes) |
 
 `./py` runs Python inside the dev shell (`nix develop`), so it works without entering the shell
 first. The first call builds the environment (Python 3.14, numpy, scipy, pandas, pyarrow, torch,
@@ -24,11 +24,11 @@ git clone <repo> gaitanalysis && cd gaitanalysis
 ./py -c "import torch, gradio; print('ok')"       # builds the environment once
 ```
 
-## 1. Download the data (`src/download_data.py`)
+## 1. Download the data (`src/helpers/download_data.py`)
 
 ```sh
-./py src/download_data.py fukuchi toronto kuopio   # ~1 GB, minutes
-./py src/download_data.py ferber                   # 22.8 GB + 7-Zip extraction (Deflate64)
+./py src/helpers/download_data.py fukuchi toronto kuopio   # ~1 GB, minutes
+./py src/helpers/download_data.py ferber                   # 22.8 GB + 7-Zip extraction (Deflate64)
 ```
 
 | Dataset | Licence | Source | Role |
@@ -44,8 +44,7 @@ taken from the 23 GB of zips, read with HTTP range requests.
 ## 2. Build the processed dataset
 
 ```sh
-./py src/build_dataset.py                 # all three training sources -> data/processed/<dataset>/
-./py src/make_notebooks.py                # notebooks 01-05 (data, skeleton QC, events, kinematics, Toronto)
+./py src/helpers/build_dataset.py                 # all three training sources -> data/processed/<dataset>/
 ```
 
 The steps are: canonical skeleton → sagittal projection → pelvis-centred, leg-length-scaled → 30 Hz →
@@ -56,56 +55,55 @@ all trials in `data/processed/model_trials_v2.pkl`.
 ## 3. Train
 
 ```sh
-./py src/train.py --name bigru_v4 --features v3 --angle-beta 0.1 --asym-p 0.5 --threads 6   # final model, ~2.6 h
+./py src/train.py                 # final model -> outputs/models/bigru_v4/, ~2.5 h (50 epochs, ~190 s each)
 ```
 
-The final model takes 50 epochs × 200 steps, about 190 s per epoch on 6 threads; seed 0 is the default.
-The ablation runs from `src/model_findings.md` are optional:
+The settings are constants at the top of `train.py`. The earlier model versions compared in
+`src/model_findings.md` were trained with previous versions of the code; only the final model is kept here.
 
-```sh
-V1="--features v1 --no-angle-head --swap-p 0 --epochs 40"
-./py src/train.py --name bigru_clean $V1 --no-aug                    # v1 without pose noise
-./py src/train.py --name bigru_aug $V1                               # v1: pooled heads + pose noise
-./py src/train.py --name bigru_v2 --features v2                      # dense event/angle heads + L/R mirror
-./py src/train.py --name bigru_v2_noswap --features v2 --swap-p 0    # without the L/R mirror
-./py src/train.py --name bigru_v3 --features v3 --angle-beta 0.1     # + gated geometric angles
-```
-
-Each run writes `outputs/models/<name>/{model.pt, config.json, norm.json}` and logs to `outputs/logs/`.
+Each run writes `outputs/models/<name>/{model.pt, config.json, norm.json}` and `history.csv` (per-epoch losses).
 CPU training is deterministic per seed within a machine. Across machines and torch builds, expect
 small numeric differences, not different conclusions.
 
 ## 4. Evaluate on held-out subjects (mocap + simulated pose noise)
 
 ```sh
-./py src/evaluate.py bigru_v4 bigru_v3 bigru_v2 bigru_v2_noswap bigru_aug bigru_clean   # per 5 s window
-./py src/evaluate_trials.py bigru_v4 bigru_v3                                          # per recording
-./py src/evaluate_trials.py bigru_v4 bigru_v3 --two-pass                               # across-and-back protocol
-./py src/make_model_notebook.py                                                        # notebooks/06_model_results.ipynb
+./py src/evaluate.py             # per 5 s window, noise levels 0-0.08 -> outputs/eval/test/
+./py src/evaluate_trials.py       # per recording -> outputs/eval/test_trial/
 ```
 
-Outputs go to `outputs/eval/test*/` (regression.csv, events.csv, symmetry_bins.csv, …). The demo
+Outputs: `predictions.parquet`, `regression.csv` (and `events.csv` per window). The demo
 needs `outputs/eval/test_trial/regression.csv` for its per-output expected error.
 
-## 5. External validation on real video (Kuopio)
+## 5. The walkthrough notebook
+
+`notebooks/gait_walkthrough.ipynb` explains the project for readers without a biomechanics background
+(glossary, data, how the model works, results, subgroups, real video, limits). It reads the outputs of
+steps 2–4 and 6, so re-run it after them (about a minute):
 
 ```sh
-./py src/build_kuopio.py --estimate-fps 12   # video frame rate from geometry (writes outputs/kuopio/fps_estimate.json)
-./py src/build_kuopio.py                     # sync every clip to mocap -> data/processed/kuopio_clips.pkl
-./py src/evaluate_kuopio.py                  # -> outputs/kuopio/summary.md + CSVs (~15 min, 12 workers)
-./py src/plot_kuopio.py                      # -> outputs/figures/07_kuopio.png
+cd notebooks && nix develop .. -c jupyter nbconvert --to notebook --execute --inplace \
+    --ExecutePreprocessor.kernel_name=gait gait_walkthrough.ipynb
+```
+
+## 6. External validation on real video (Kuopio)
+
+```sh
+./py src/helpers/build_kuopio.py   # sync every clip to mocap at 97 fps -> data/processed/kuopio_clips.pkl
+./py src/evaluate_kuopio.py        # -> outputs/kuopio/summary.md + CSVs (~1 min)
+./py src/helpers/plot_kuopio.py    # -> outputs/figures/07_kuopio.png
 # frame-rate sensitivity (optional)
-./py src/build_kuopio.py --fps 100 --out data/processed/kuopio_clips_fps100.pkl
+./py src/helpers/build_kuopio.py --fps 100 --out data/processed/kuopio_clips_fps100.pkl
 ./py src/evaluate_kuopio.py --clips data/processed/kuopio_clips_fps100.pkl --out outputs/kuopio/fps100
 ```
 
-Kuopio gives neither the video frame rate nor the clip start times, so `build_kuopio.py` recovers
-them from geometry. Each subject gets one fixed side camera, shared by all of that subject's trials,
-plus one start time per clip, chosen to minimise the distance between left/right-labelled hip, knee
-and ankle keypoints and the projected mocap joints. The force plates are not used for the sync, so the
-heel-strike timing against them is an independent check.
+Kuopio gives neither the video frame rate nor the clip start times, so `helpers/build_kuopio.py` recovers
+them from geometry: one fixed side camera per subject and one start time per clip, chosen so the video's hip,
+knee and ankle keypoints sit on the mocap joints. 97 fps fitted best (estimated once from 12 subjects with an
+earlier version of the script). The force plates are not used for the sync, so the heel-strike timing against
+them is an independent check.
 
-## 6. Run the demo
+## 7. Run the demo
 
 ```sh
 ./py src/app.py               # http://127.0.0.1:7860
@@ -135,6 +133,6 @@ paths from a machine that has them (about 3.5 MB together).
 
 - **gradio marked broken in nixpkgs** (its `mcp` pin): `flake.nix` already overrides it
   (`problems.handlers` plus `doInstallCheck = false; dontCheckRuntimeDeps = true`).
-- **`unzip` fails on Ferber's `ric_data.zip`**: the zip uses Deflate64; `download_data.py` uses `7zz` from the dev shell.
+- **`unzip` fails on Ferber's `ric_data.zip`**: the zip uses Deflate64; `helpers/download_data.py` uses `7zz` from the dev shell.
 - **Annotated video won't play in the browser**: it needs `ffmpeg` (H.264), which the dev shell provides.
 - **"Git tree is dirty" warnings** from `nix develop` are harmless.

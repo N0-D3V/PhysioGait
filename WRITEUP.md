@@ -36,7 +36,7 @@ The Gradio demo (`src/app.py`) has three tabs:
 3. **Gated geometric skip (v3).** The angle head blends a learned curve with the angle computed directly from the keypoints, through a learned per-frame gate. On clean pose it reproduces exact geometry (angle RMSE 0.05–0.25°); on noisy pose it falls back to the learned curve.
 4. **Synthetic asymmetry (v4).** We diagnosed that the model had learned "the legs are half a cycle apart" from a near-symmetric training set. Fix: per-leg time shifts and rigid per-joint amplitude scaling, with every label recomputed. This raised the step-time SI slope from 0.65 to 0.86 (Ferber, σ = 0.02).
 5. **Recording-level evaluation and the across-and-back protocol.** Strides are pooled over a whole recording, and the patient is filmed walking both ways. On mocap + noise, measuring each leg from its near-camera pass helped slightly. On real Kuopio video, pooling all strides was better (section 6).
-6. **Video pipeline.** YOLOX + RTMPose (Halpe-26, with heels and toes) on CPU; Viterbi left/right label repair; facing-direction pass splitting; overlapping windows with tapered blending; and a pose-quality estimate mapped to each output's validated error.
+6. **Video pipeline.** YOLOX + RTMPose (Halpe-26, with heels and toes) on CPU; Viterbi left/right label repair; facing-direction pass splitting; overlapping windows with tapered blending; and each output shown with its validated typical error.
 7. **External validation on real video keypoints (Kuopio).** Geometry-only video-to-mocap synchronisation, with force plates kept as an independent check (section 6).
 
 ## 4. How it works
@@ -75,7 +75,7 @@ convolution branch. Outputs:
 Decoding works in four steps:
 1. Peaks are taken with sub-frame parabolic refinement.
 2. Strides are formed from heel strike to heel strike.
-3. `gaitdata.derive` computes the outputs.
+3. `helpers/gaitdata.derive` computes the outputs.
 4. Values are pooled over the recording.
 
 Training data comes from three sources: pose noise (random level per window), the L/R mirror
@@ -107,8 +107,9 @@ Kuopio are measured against force plates.
 **Per recording** (≈30 s, strides pooled, σ = 0.02), Ferber step-time SI: MAE 0.82 (mean predictor
 1.77), slope 0.89. **Symmetry slope** (1 = an asymmetry is reported at its true size), step-time SI at
 σ = 0.02: v1 0.51 → v4 0.86 (Ferber), 0.33 → 0.73 (Toronto). The ablation for each step is in
-`src/model_findings.md` and `notebooks/06_model_results.ipynb`, together with Bland–Altman plots and
-age and sex subgroups.
+`src/model_findings.md`; Bland–Altman and degradation figures are in `outputs/figures/06_*.png`, and the
+age and sex subgroup check is in `notebooks/gait_walkthrough.ipynb` (errors similar for women and men,
+somewhat larger at 65 and over).
 
 ## 6. Real-video validation (Kuopio)
 
@@ -218,9 +219,9 @@ and σ = 0.04.
 ## 9. Project log (what was done, in order)
 
 1. **Data.** Downloaded Fukuchi, Ferber (walking subset), Toronto; built canonical skeletons, sagittal
-   projection, labels and QC filters. Notebooks 01–05 cover the data overview and filter funnel, skeleton
+   projection, labels and QC filters. Data notebooks covered the filter funnel, skeleton
    QC, events against force plates (Zeni bias), joint kinematics (validated against the datasets' own
-   angles), and Toronto pose and clinical scores.
+   angles), and Toronto pose and clinical scores (figures kept in `outputs/figures/0[1-5]_*.png`).
 2. **Environment.** A Nix flake with a pinned nixpkgs and a Jupyter kernel; `./py` wrapper.
 3. **Model v1.** A BiGRU with pooled heads and pose-noise augmentation, with baselines and degradation
    curves. It held up under noise but shrank asymmetries toward zero.
@@ -228,12 +229,18 @@ and σ = 0.04.
    real-video path.
 5. **v2 → v4.** Dense heads with formulas, L/R mirror, gated geometric angles, local conv branch,
    synthetic asymmetry. Ablated at every step; recording-level and two-pass evaluation added
-   (`src/model_findings.md`, notebook 06).
+   (`src/model_findings.md`).
 6. **Video pipeline and demo.** YOLOX + RTMPose on ONNX/CPU, Viterbi L/R repair, pass splitting,
-   overlapping windows, quality calibration, Gradio app. Checked on a real treadmill speed-ramp clip:
+   overlapping windows, Gradio app. Checked on a real treadmill speed-ramp clip:
    cadence and speed track the belt.
 7. **Kuopio real-video validation.** Selective download, a C3D reader, geometry-only sync, and an
-   evaluation on 890 real OpenPose clips (section 6).
+   evaluation on 817 real OpenPose clips (section 6).
+8. **Notebooks.** The six analysis notebooks were merged into one plain-language walkthrough
+   (`notebooks/gait_walkthrough.ipynb`).
+9. **Simplification.** The code was cut back to what the final model needs (about 4,100 → 3,500 lines): the
+   model variants used for the ablation, the two-pass evaluation mode and the frame-rate estimation were removed
+   (their results are recorded in `src/model_findings.md`), and the demo's typical errors use a fixed pose-noise
+   level instead of a per-clip estimate.
 
 ## 10. Sources and credits
 

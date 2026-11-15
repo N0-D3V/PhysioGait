@@ -1,65 +1,44 @@
 # Gait measurement from a side-on walking video
 
-From an X-second side-on walking clip → 2D pose → gait measurements a physio cannot eyeball: interlimb symmetry,
-spatiotemporal parameters and joint range of motion, validated against gold-standard motion capture on held-out
-subjects. Measurement and progress tracking, not diagnosis.
+Side-on walking clip → 2D pose → gait measurements a physio cannot eyeball (left/right symmetry, timing,
+joint range of motion), validated against motion capture and force plates on held-out subjects, including
+real video keypoints. Measurement and progress tracking, not diagnosis.
 
 *This project is a prototype and is not medical advice.*
 
-## Run
-
-Everything runs inside the Nix flake (CPU only). `./py` runs Python in the dev shell.
-
 ```sh
-./py src/app.py            # Gradio demo on http://127.0.0.1:7860   (--share for a public link)
+./py src/app.py        # Gradio demo on http://127.0.0.1:7860 (CPU; --share for a public link)
 ```
 
-The first video analysis downloads the two pose models (~150 MB, OpenMMLab) into `outputs/pose_models/`.
-The app also needs the trained model `outputs/models/bigru_v4/` and the evaluation table
-`outputs/eval/test_trial/regression.csv` (both produced by the commands below; `outputs/` is not in git).
+`./py` runs Python inside the Nix flake's dev shell. The demo needs `outputs/models/bigru_v4/` and
+`outputs/eval/test_trial/regression.csv` (not in git; see `REPRODUCE.md`), and downloads the two pose
+models (~150 MB) on first use.
 
-## Pipeline
+- **[GUIDE.md](GUIDE.md)**: every part of the codebase explained (data, model, training, evaluation, demo), with talking points.
+- **[WRITEUP.md](WRITEUP.md)**: problem, method, results per dataset, real-video validation, limits, project log.
+- **[REPRODUCE.md](REPRODUCE.md)**: every step from download to demo, with expected checks.
+- **[notebooks/gait_walkthrough.ipynb](notebooks/gait_walkthrough.ipynb)**: the whole project explained for non-specialists, with figures.
+- `src/model_findings.md`: model ablation (v1 → v4).
 
-| Step | Code |
+## Code map (`src/`)
+
+The model and everything that runs it are directly in `src/`; data loading, processing and plotting helpers
+are in `src/helpers/`.
+
+| Stage | Files |
 |---|---|
-| Video → keypoints: YOLOX person detector + RTMPose-m Halpe-26 (heels, toes), ONNX on CPU | `src/pose_video.py` |
-| Keypoints → model input: L/R swap repair, walking passes, pelvis-centred, leg-length-scaled, 30 Hz | `src/video_pipeline.py` |
-| BiGRU (v4): per-frame gait events + gated joint-angle curves | `src/model.py` |
-| Events + angles → strides → outputs, with the same formulas as the labels | `src/gaitdata.py` (`derive`) |
-| Figures, annotated video | `src/render.py` |
-| Demo | `src/app.py` |
-| Real-video validation (Kuopio): C3D reader, geometry-only sync, evaluation | `src/c3d.py`, `src/load_kuopio.py`, `src/build_kuopio.py`, `src/evaluate_kuopio.py` |
-
-Data, training and evaluation (full details in `REPRODUCE.md`):
-
-```sh
-./py src/download_data.py                                              # all four datasets -> data/<dataset>/
-./py src/build_dataset.py                                              # datasets -> data/processed
-./py src/train.py --name bigru_v4 --features v3 --angle-beta 0.1 --asym-p 0.5
-./py src/evaluate.py bigru_v4 bigru_v3 bigru_v2 bigru_v2_noswap bigru_aug bigru_clean
-./py src/evaluate_trials.py bigru_v4 bigru_v3 && ./py src/evaluate_trials.py bigru_v4 bigru_v3 --two-pass
-./py src/make_model_notebook.py                                        # notebooks/06_model_results.ipynb
-```
-
-Results and limitations: `notebooks/06_model_results.ipynb` and `src/model_findings.md`.
-Real-video validation on Kuopio (OpenPose keypoints vs Vicon + force plates): `src/build_kuopio.py`,
-`src/evaluate_kuopio.py`, `src/plot_kuopio.py` → `outputs/kuopio/summary.md`, `outputs/figures/07_kuopio.png`.
-
-**Write-up** (problem, method, results per dataset, real-video validation, failure modes, project log):
-[`WRITEUP.md`](WRITEUP.md). **Step-by-step reproduction** (downloads, build, training, evaluation, demo,
-expected checks): [`REPRODUCE.md`](REPRODUCE.md).
+| Model, pose-noise and asymmetry augmentation, training | `model.py`, `augment.py`, `train.py` |
+| Baseline and evaluation (per window, per recording, real video) | `classic.py`, `evaluate.py`, `evaluate_trials.py`, `evaluate_kuopio.py` |
+| Video → pose → model → report; demo | `pose_video.py`, `video_pipeline.py`, `app.py` |
+| Data: download, per-dataset loaders, C3D reader, skeleton and labels, processed datasets | `helpers/download_data.py`, `helpers/load_{fukuchi,ferber,toronto,kuopio}.py`, `helpers/c3d.py`, `helpers/canonical.py`, `helpers/build_dataset.py`, `helpers/build_kuopio.py` |
+| Model data, splits, the stride and label formulas | `helpers/gaitdata.py` |
+| Paths and plot style; demo figures and videos; real-video figure | `helpers/analysis.py`, `helpers/render.py`, `helpers/plot_kuopio.py` |
 
 ## Recording tips
 
-Camera at hip height, perpendicular to the walking line, whole body including the feet in frame, ≥ 20 s of steady
-walking. Walk across **and back**, so each leg is measured from the pass where it faces the camera.
+Camera at hip height, perpendicular to the walking line, whole body including the feet in frame, at least
+20 s of steady walking, across and back.
 
-## Sources
-
-- Fukuchi CA, Fukuchi RK, Duarte M (2018). Walking biomechanics dataset (WBDS). PeerJ / Figshare, CC BY.
-- Ferber R et al. Running Injury Clinic gait database, walking trials (Figshare 24255795; Sci Data 2024).
-- Toronto Older Adults Gait Archive (Sci Data 2022, doi:10.1038/s41597-022-01495-z), CC BY.
-- Kuopio gait dataset (Lavikainen et al., Zenodo 10.5281/zenodo.10559504), CC BY 4.0: validation only.
-- Pose models: RTMPose and YOLOX (OpenMMLab MMPose / MMDetection, Apache-2.0).
-- Demo video: Yoon J, Park H-S, Damiano DL (2012), J NeuroEng Rehabil 9:62, CC BY 2.0, via Wikimedia Commons
-  (`data/demo_videos/ATTRIBUTION.md`).
+Data: Fukuchi WBDS, Ferber Running Injury Clinic, Toronto Older Adults, Kuopio (all CC BY; full citations
+in `WRITEUP.md`). Pose models: RTMPose and YOLOX (OpenMMLab, Apache-2.0). Demo video: Yoon et al. 2012,
+CC BY 2.0.
