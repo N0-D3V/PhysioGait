@@ -1,0 +1,1 @@
+{"hidden": 128, "layers": 2, "W": 150, "epochs": 25, "seed": 0, "init": "bigru_v4", "lr": 0.0003, "real_noise": true}

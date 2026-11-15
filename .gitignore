@@ -1,6 +1,15 @@
 # raw + processed datasets (~52 GB)
 data/
-outputs/
+outputs/*
+# keep the trained model and the error table the demo needs
+!outputs/models/
+outputs/models/*
+!outputs/models/bigru_v5/
+!outputs/eval/
+outputs/eval/*
+!outputs/eval/test_trial/
+outputs/eval/test_trial/*
+!outputs/eval/test_trial/regression.csv
 .ipynb_checkpoints/
 __pycache__/
 result
