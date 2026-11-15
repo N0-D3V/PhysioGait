@@ -36,6 +36,7 @@ QC = dict(
     walk_speed=(0.3, 2.2),     # m/s; above that the "walking" trial is likely a jog
     min_strides=2,             # valid strides per side (treadmill / Toronto passes)
     max_stride_cv=20.0,        # % ; larger = event detection failure / non-steady gait
+    min_clean_s=10.0,          # gappy long trials: keep longest clean stretch if >= this
 )
 
 
@@ -54,10 +55,23 @@ def process(rec: dict, mode: str) -> tuple[dict, list[dict], dict]:
     xyz, fs, up = rec["xyz"].astype(np.float64), rec["fs"], rec["up"]
     row = {"fs": fs, "n_frames": len(xyz), "duration_s": len(xyz) / fs,
            "missing_frac": float(np.isnan(xyz).any(-1).any(-1).mean())}
-    if row["missing_frac"] > QC["max_missing_frac"]:
-        return row | {"reject_reason": "missing_markers"}, [], {}
     good = ~np.isnan(xyz).any(-1).any(-1)
-    xyz = xyz[good.argmax(): len(good) - good[::-1].argmax()]          # trim NaN ends
+    crop = (0, len(xyz))
+    if row["missing_frac"] > QC["max_missing_frac"]:
+        # long trials: salvage the longest gap-free stretch if it is long enough
+        d = np.diff(np.r_[0, good.astype(int), 0])
+        runs = list(zip(np.where(d == 1)[0], np.where(d == -1)[0]))
+        s, e = max(runs, key=lambda r: r[1] - r[0]) if runs else (0, 0)
+        if mode == "overground" or (e - s) < QC["min_clean_s"] * fs:
+            return row | {"reject_reason": "missing_markers"}, [], {}
+        crop = (s, e)
+    else:
+        crop = (good.argmax(), len(good) - good[::-1].argmax())       # trim NaN ends
+    xyz = xyz[crop[0]:crop[1]]
+    row |= {"crop_start": int(crop[0]), "duration_used_s": len(xyz) / fs}
+    gold = rec.get("gold_events")
+    if gold and crop[0] > 0 or gold and crop[1] < row["n_frames"]:
+        gold = {k: v[(v >= crop[0]) & (v < crop[1])] - crop[0] for k, v in gold.items()}
     xyz = np.nan_to_num(xyz)  # residual isolated NaNs (<1%) — negligible after filtering
     fwd = treadmill_forward(xyz, up) if mode == "treadmill" else progression_axis_pca(xyz[:, J["pelvis"]], up)
     xyz_f = lowpass(xyz.reshape(len(xyz), -1), fs, fc=6.0).reshape(xyz.shape)
@@ -68,7 +82,6 @@ def process(rec: dict, mode: str) -> tuple[dict, list[dict], dict]:
     pel = sag[:, J["pelvis"], 0]
     row["speed_pelvis"] = float(abs(np.median(np.gradient(pel) * fs)))
     ev = detect_events(sag, fs)
-    gold = rec.get("gold_events")
     use = gold if gold else ev
     row["event_source"] = "grf" if gold else "zeni"
     strides = stride_table(use, ang, fs)
@@ -122,8 +135,13 @@ def _run_one(args):
             import load_ferber as L
             rec = L.load_trial(pd.Series(meta))
             meta["max_cluster_rms_mm"] = max(v for k, v in rec.items() if k.startswith("rms_"))
+            meta["toe_source"] = rec["toe_source"]
         row, strides, arrays = process(rec, meta["mode"])
         row = meta | row | {"n_missing_frames_raw": rec.get("n_missing_frames_raw")}
+    except ValueError as e:
+        if type(e).__name__ == "NoFootLandmarks":
+            return meta | {"reject_reason": "no_foot_landmarks"}, [], None
+        return meta | {"reject_reason": f"load_error: {type(e).__name__}: {e}"[:200]}, [], None
     except Exception as e:  # noqa: BLE001 — record failure, keep going
         return meta | {"reject_reason": f"load_error: {type(e).__name__}: {e}"[:200]}, [], None
     return row, strides, arrays
@@ -133,7 +151,7 @@ def _finish(ds, rows, out):
     df = pd.DataFrame(rows)
     df["reject_reason"] = [qc_reason(r, r["mode"]) for r in rows]
     df["keep"] = df.reject_reason.isna()
-    df.drop(columns=[c for c in ("path",) if c in df], inplace=True)
+    df = df.drop(columns=[c for c in ("path",) if c in df])
     df.to_parquet(out / "trials.parquet", index=False)
     print(f"[{ds}] {len(df)} trials, kept {df.keep.sum()} "
           f"({df[df.keep].subject.nunique()} subjects); rejects: {df.reject_reason.value_counts().to_dict()}")

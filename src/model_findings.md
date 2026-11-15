@@ -51,5 +51,28 @@ estimate. For the model it gives knee-ROM SI slope 0.69 → 0.73 (Toronto). Reco
   pooled 0.03) remain the weakest external-set numbers.
 - **v4 vs v3 trade-off**: v3 is slightly better on stance-time SI and Toronto stance % (0.60 vs 0.84); v4 is better
   on every step-time and ROM symmetry slope. v4 is kept because reporting asymmetry at its true size was the goal.
-- Everything here is still mocap-derived pose with simulated noise; real pose-estimator output has not been
-  tested yet.
+- Everything above uses mocap-derived pose with simulated noise. Real pose-estimator output is tested below (Kuopio).
+
+### Real video keypoints: Kuopio (`build_kuopio.py`, `evaluate_kuopio.py`)
+817 OpenPose clips (~1.05 s each) from 42 held-out subjects, synchronised to Vicon by geometry only. The
+force-plate heel strike falls 0.254 s (IQR 14 ms) into every clip, an independent check of the sync.
+
+| per clip, real video | v4 | classic | mean |
+|---|---|---|---|
+| heel strike vs force plate (ms) | **20** | 24 | |
+| stance / step time (ms) | **33 / 26** | 38 / 27 | 50 / 40 |
+| speed (m/s) | **0.075** | 0.48 | 0.134 |
+| hip / knee / ankle excursion (°) | **4.1 / 5.7 / 3.8** | 5.7 / 8.3 / 13.5 | |
+| knee / hip / ankle ROM SI per subject (%) | **4.2** / 3.7 / 10.1 | 10.2 / 9.5 / 29.8 | 5.1 / **3.2** / **8.7** |
+
+- The model transfers and the classic pipeline breaks down on real pose; that is the brief's central
+  claim, now on real video.
+- Real OpenPose jitter matches the noise model (0.02–0.035 leg lengths), but the error is temporally correlated
+  (lag-1 r 0.6–0.7), has 0.05–0.07 constant foot offsets and 4–7 % gross foot/knee errors, so accuracy sits at or beyond
+  the simulated σ = 0.04 level. Knee excursion is under-read by ~5°.
+- Toe-off is 34 ms early (heel strike +8 ms) against Kuopio's plates **already on clean mocap input**: an event-
+  definition shift (barefoot overground, foot markers), not a video effect. Absolute stance/swing need calibration.
+- Hip- and ankle-ROM SI from ~20 one-stride clips are no better than the mean predictor; knee-ROM SI is
+  informative (r 0.56) but compressed. Near-leg-only measurement did not help (near and far OpenPose errors were similar).
+- Next: fit the noise model to these real error statistics (correlated, outliers, foot offsets), fine-tune on a
+  subject-split part of Kuopio, and raise the demo's reliability floor.

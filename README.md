@@ -28,10 +28,12 @@ The app also needs the trained model `outputs/models/bigru_v4/` and the evaluati
 | Events + angles → strides → outputs, with the same formulas as the labels | `src/gaitdata.py` (`derive`) |
 | Figures, annotated video | `src/render.py` |
 | Demo | `src/app.py` |
+| Real-video validation (Kuopio): C3D reader, geometry-only sync, evaluation | `src/c3d.py`, `src/load_kuopio.py`, `src/build_kuopio.py`, `src/evaluate_kuopio.py` |
 
-Data, training and evaluation:
+Data, training and evaluation (full details in `REPRODUCE.md`):
 
 ```sh
+./py src/download_data.py                                              # all four datasets -> data/<dataset>/
 ./py src/build_dataset.py                                              # datasets -> data/processed
 ./py src/train.py --name bigru_v4 --features v3 --angle-beta 0.1 --asym-p 0.5
 ./py src/evaluate.py bigru_v4 bigru_v3 bigru_v2 bigru_v2_noswap bigru_aug bigru_clean
@@ -40,6 +42,12 @@ Data, training and evaluation:
 ```
 
 Results and limitations: `notebooks/06_model_results.ipynb` and `src/model_findings.md`.
+Real-video validation on Kuopio (OpenPose keypoints vs Vicon + force plates): `src/build_kuopio.py`,
+`src/evaluate_kuopio.py`, `src/plot_kuopio.py` → `outputs/kuopio/summary.md`, `outputs/figures/07_kuopio.png`.
+
+**Write-up** (problem, method, results per dataset, real-video validation, failure modes, project log):
+[`WRITEUP.md`](WRITEUP.md). **Step-by-step reproduction** (downloads, build, training, evaluation, demo,
+expected checks): [`REPRODUCE.md`](REPRODUCE.md).
 
 ## Recording tips
 
@@ -51,6 +59,7 @@ walking. Walk across **and back**, so each leg is measured from the pass where i
 - Fukuchi CA, Fukuchi RK, Duarte M (2018). Walking biomechanics dataset (WBDS). PeerJ / Figshare, CC BY.
 - Ferber R et al. Running Injury Clinic gait database, walking trials (Figshare 24255795; Sci Data 2024).
 - Toronto Older Adults Gait Archive (Sci Data 2022, doi:10.1038/s41597-022-01495-z), CC BY.
+- Kuopio gait dataset (Lavikainen et al., Zenodo 10.5281/zenodo.10559504), CC BY 4.0: validation only.
 - Pose models: RTMPose and YOLOX (OpenMMLab MMPose / MMDetection, Apache-2.0).
 - Demo video: Yoon J, Park H-S, Damiano DL (2012), J NeuroEng Rehabil 9:62, CC BY 2.0, via Wikimedia Commons
   (`data/demo_videos/ATTRIBUTION.md`).

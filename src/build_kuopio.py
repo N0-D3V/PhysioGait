@@ -34,7 +34,10 @@ def subject_clips(sub: str, invalid: set[str]):
         kp = K.openpose(sub, t)
         if len(kp) < 30 or np.isnan(kp[:, 8, 0]).mean() > 0.5:
             continue
-        m = K.mocap(sub, t)
+        try:
+            m = K.mocap(sub, t)
+        except KeyError:
+            return {}, {}
         m["xyz"] = fill_gaps(m["xyz"], max_gap=10)
         vids[t], mocs[t] = K.video_canonical(kp), m
     return vids, mocs
@@ -78,6 +81,8 @@ def records(sub, fps, geo, res, vids, mocs, row) -> list[dict]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--estimate-fps", type=int, default=0, help="estimate the frame rate on this many subjects")
+    ap.add_argument("--fps", type=float, default=0, help="video frame rate (default: the estimate on file)")
+    ap.add_argument("--out", default=str(OUT))
     ap.add_argument("--workers", type=int, default=12)
     a = ap.parse_args()
     info = K.info().set_index("subject")
@@ -93,12 +98,12 @@ def main():
         est = {s: float(r[0]) for s, r in res if r}
         best = grid[int(np.argmin(total))]
         FPS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        FPS_FILE.write_text(json.dumps({"per_subject": est, "grid": grid, "mean_rel_cost": total, "best": best}, indent=1))
+        FPS_FILE.write_text(json.dumps({"per_subject": est, "grid": grid, "mean_rel_cost": total, "fps": best}, indent=1))
         print("per subject", est)
         print("mean relative cost", dict(zip(grid, np.round(total, 3))))
         print("best", best)
         return
-    fps = json.loads(FPS_FILE.read_text())["fps"]
+    fps = a.fps or json.loads(FPS_FILE.read_text())["fps"]
     with ProcessPoolExecutor(a.workers) as ex:
         res = list(ex.map(_sync, subs, [inv[s] for s in subs], [fps] * len(subs)))
     recs = []
@@ -109,9 +114,10 @@ def main():
         f, geo, sync, diag, vids, mocs = r
         recs += records(s, f, geo, sync, vids, mocs, info.loc[s].to_dict())
         print(s, len(sync), "clips", f"median sync error {np.median([e for _, e in sync.values()]):.1f} px")
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    pickle.dump(recs, open(OUT, "wb"))
-    print(len(recs), "clips from", len({r['subject'] for r in recs}), "subjects ->", OUT)
+    out = Path(a.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pickle.dump(recs, open(out, "wb"))
+    print(len(recs), "clips from", len({r['subject'] for r in recs}), "subjects ->", out)
 
 
 if __name__ == "__main__":

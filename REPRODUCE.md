@@ -56,16 +56,17 @@ all trials in `data/processed/model_trials_v2.pkl`.
 ## 3. Train
 
 ```sh
-./py src/train.py --name bigru_v4 --features v3 --angle-beta 0.1 --asym-p 0.5     # final model, ~2.6 h
+./py src/train.py --name bigru_v4 --features v3 --angle-beta 0.1 --asym-p 0.5 --threads 6   # final model, ~2.6 h
 ```
 
 The final model takes 50 epochs × 200 steps, about 190 s per epoch on 6 threads; seed 0 is the default.
 The ablation runs from `src/model_findings.md` are optional:
 
 ```sh
-./py src/train.py --name bigru_clean --no-aug                       # no pose noise
-./py src/train.py --name bigru_aug                                   # v1: pooled heads + noise
-./py src/train.py --name bigru_v2 --features v2                      # dense event/angle heads
+V1="--features v1 --no-angle-head --swap-p 0 --epochs 40"
+./py src/train.py --name bigru_clean $V1 --no-aug                    # v1 without pose noise
+./py src/train.py --name bigru_aug $V1                               # v1: pooled heads + pose noise
+./py src/train.py --name bigru_v2 --features v2                      # dense event/angle heads + L/R mirror
 ./py src/train.py --name bigru_v2_noswap --features v2 --swap-p 0    # without the L/R mirror
 ./py src/train.py --name bigru_v3 --features v3 --angle-beta 0.1     # + gated geometric angles
 ```
@@ -91,7 +92,8 @@ needs `outputs/eval/test_trial/regression.csv` for its per-output expected error
 ```sh
 ./py src/build_kuopio.py --estimate-fps 12   # video frame rate from geometry (writes outputs/kuopio/fps_estimate.json)
 ./py src/build_kuopio.py                     # sync every clip to mocap -> data/processed/kuopio_clips.pkl
-./py src/evaluate_kuopio.py                  # -> outputs/kuopio/summary.md + CSVs
+./py src/evaluate_kuopio.py                  # -> outputs/kuopio/summary.md + CSVs (~15 min, 12 workers)
+./py src/plot_kuopio.py                      # -> outputs/figures/07_kuopio.png
 # frame-rate sensitivity (optional)
 ./py src/build_kuopio.py --fps 100 --out data/processed/kuopio_clips_fps100.pkl
 ./py src/evaluate_kuopio.py --clips data/processed/kuopio_clips_fps100.pkl --out outputs/kuopio/fps100
@@ -126,7 +128,8 @@ paths from a machine that has them (about 3.5 MB together).
 | splits | train 1205 / val 258 / test 269 subjects |
 | `outputs/eval/test/events.csv`, bigru_v4, σ=0.02, Ferber HS | MAE ≈ 3.5 ms (classic ≈ 11 ms) |
 | `outputs/eval/test/regression.csv`, bigru_v4+derived, σ=0.02, Ferber SI_step_time | slope ≈ 0.86 |
-| `outputs/kuopio/summary.md` | 890 clips, 45 subjects, median sync error ≈ 12 px |
+| `data/processed/kuopio_clips.pkl` | 890 clips from 45 subjects (07, 09, 10, 24 lack ankle joint centres) |
+| `outputs/kuopio/summary.md` | 817 evaluable clips, 42 subjects, median sync error ≈ 12 px, first plate heel strike ≈ 0.254 s into each clip |
 
 ## Troubleshooting
 

@@ -18,7 +18,7 @@ _DTYPE = {-1: "S1", 1: "i1", 2: "<i2", 4: "<f4"}
 def _params(buf: bytes) -> dict:
     groups, pending = {}, []
     i = 4
-    while i < len(buf):
+    while i + 2 <= len(buf):
         n, gid = np.frombuffer(buf, "i1", 2, i)
         n = abs(int(n))
         if n == 0:
@@ -47,7 +47,7 @@ def _params(buf: bytes) -> dict:
             pending.append((gid, name, val))
         if nxt == 0:
             break
-        i = j - (0 if gid < 0 else 0) if False else (i + 2 + n + nxt)
+        i = i + 2 + n + nxt
     out = {}
     for gid, name, val in pending:
         out.setdefault(groups.get(gid, {}).get("__name__", str(gid)), {})[name] = val
@@ -83,10 +83,8 @@ def read(path) -> dict:
     per = n_pts * 4 + n_an_per_frame
     raw = np.frombuffer(data, "<f4" if isfloat else "<i2", n_frames * per, (start - 1) * 512).reshape(n_frames, per)
     pts = raw[:, :n_pts * 4].reshape(n_frames, n_pts, 4).astype(np.float64)
-    if isfloat:
-        resid = pts[..., 3]
-    else:
-        resid = pts[..., 3]
+    resid = pts[..., 3]
+    if not isfloat:
         pts[..., :3] *= scale
     xyz = pts[..., :3].copy()
     xyz[resid < 0] = np.nan
@@ -99,8 +97,7 @@ def read(path) -> dict:
         gen = float(np.asarray(an_p.get("GEN_SCALE", 1.0)).ravel()[0])
         sc = np.asarray(an_p.get("SCALE", np.ones(n_ch)), float).ravel()[:n_ch]
         off = np.asarray(an_p.get("OFFSET", np.zeros(n_ch)), float).ravel()[:n_ch]
-        if not isfloat or True:
-            an = (an - off) * sc * gen
+        an = (an - off) * sc * gen
     labels = pt.get("LABELS", [])
     labels = [labels] if isinstance(labels, str) else list(labels)
     labels += list(pt.get("LABELS2", [])) if "LABELS2" in pt else []

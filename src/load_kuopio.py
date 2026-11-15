@@ -100,6 +100,9 @@ def mocap(subject: str, trial: str) -> dict:
     """Canonical joints [T, 11, 3] (m, lab frame), force-plate events (s) and walking direction."""
     r = c3d.read(RAW / subject / "mocap" / f"{trial}.c3d")
     L, P = r["labels"], r["points"] / 1000.0
+    missing = sorted({m for ms in MOCAP.values() for m in ms} - set(L))
+    if missing:                                   # subjects 07, 09, 10, 24 have no ankle joint centres
+        raise KeyError(f"{subject}/{trial}: no {', '.join(missing)}")
     pts = {j: np.mean([P[:, L.index(m)] for m in ms], 0) for j, ms in MOCAP.items()}
     pts["pelvis"] = 0.5 * (pts["L_hip"] + pts["R_hip"])
     xyz = np.stack([pts[j] for j in JOINTS], 1)
@@ -153,14 +156,13 @@ def _project(M: np.ndarray, geo) -> np.ndarray:
 
 
 def _cost(V, M, fps, geo, t0s) -> np.ndarray:
-    out = np.full(len(t0s), np.inf)
+    """Median labelled joint distance (px) for each candidate start time (vectorised over t0s)."""
     n = len(V)
-    for k, t0 in enumerate(t0s):
-        d = np.linalg.norm(_project(_interp(M, t0 * FS_MOCAP + np.arange(n) * FS_MOCAP / fps), geo) - V, axis=-1)
-        d = d[np.isfinite(d)]
-        if len(d) > 0.5 * V.shape[0] * V.shape[1]:
-            out[k] = np.median(d)
-    return out
+    idx = (np.asarray(t0s)[:, None] * FS_MOCAP + np.arange(n) * FS_MOCAP / fps).ravel()
+    d = np.linalg.norm(_project(_interp(M, idx), geo).reshape((len(t0s), n) + V.shape[1:]) - V, axis=-1)
+    ok = np.isfinite(d)
+    med = np.nanmedian(np.where(ok, d, np.nan).reshape(len(t0s), -1), 1)
+    return np.where(ok.reshape(len(t0s), -1).sum(1) > 0.5 * V.shape[0] * V.shape[1], med, np.inf)
 
 
 def _best_t0(V, M, fps, geo, step=0.01, around=None):
@@ -189,9 +191,12 @@ def _fit_geo(pairs, fps, t0s):
     return np.linalg.lstsq(A[keep], b[keep], rcond=None)[0]
 
 
-def sync_subject(clips: dict[str, tuple[np.ndarray, np.ndarray]], fps_grid=np.arange(96, 104.1, 1.0)):
+def sync_subject(clips: dict[str, tuple[np.ndarray, np.ndarray]], fps: float | None = None,
+                 fps_grid=np.arange(84, 106.1, 1.0)):
     """clips: trial -> (video keypoints [n, 6, 2] px for SYNC_JOINTS, mocap [T, 6, 2] lab (Y, Z) m).
 
+    fps: known video frame rate; None estimates it (shallow optimum: it trades off against the
+    camera scale, so `build_kuopio` estimates it on several subjects and then fixes it).
     Returns (fps, geo, {trial: (t0 s, median px error)}, diagnostics)."""
     pairs = list(clips.values())
     # 1. coarse: scan the horizontal camera offset with a typical scale; vertical offset from the hips
@@ -199,20 +204,20 @@ def sync_subject(clips: dict[str, tuple[np.ndarray, np.ndarray]], fps_grid=np.ar
     s0 = 330.0
     by0 = float(np.nanmedian(V0[:, :2, 1]) + s0 * np.nanmedian(M0[:, :2, 1]))
     best = (np.inf,)
-    for fps in (98.0, 100.0, 102.0):
+    for f in ((98.0, 100.0, 102.0) if fps is None else (fps,)):
         for bx in np.arange(-400, 1600, 30):
-            c = np.median([_best_t0(V, M, fps, (s0, bx, by0), 0.02)[0] for V, M in pairs[:6]])
+            c = np.median([_best_t0(V, M, f, (s0, bx, by0), 0.02)[0] for V, M in pairs[:6]])
             if c < best[0]:
-                best = (c, fps, bx)
-    _, fps, bx = best
+                best = (c, f, bx)
+    _, f0, bx = best
     geo = np.array([s0, bx, by0])
     # 2. alternate start times and shared geometry
     for _ in range(3):
-        t0s = [_best_t0(V, M, fps, geo, 0.01)[1] for V, M in pairs]
-        geo = _fit_geo(pairs, fps, t0s)
+        t0s = [_best_t0(V, M, f0, geo, 0.01)[1] for V, M in pairs]
+        geo = _fit_geo(pairs, f0, t0s)
     # 3. frame rate (shared), then fine start times
     costs = []
-    for f in fps_grid:
+    for f in (fps_grid if fps is None else [fps]):
         t0s = [_best_t0(V, M, f, geo, 0.01)[1] for V, M in pairs]
         g = _fit_geo(pairs, f, t0s)
         costs.append((np.median([_best_t0(V, M, f, g, 0.01, t)[0] for (V, M), t in zip(pairs, t0s)]), f, g))

@@ -20,6 +20,7 @@ import argparse
 import pickle
 import sys
 import warnings
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,7 @@ CLIPS = ROOT / "data" / "processed" / "kuopio_clips.pkl"
 OUT = ROOT / "outputs" / "kuopio"
 CONF = 0.3          # keypoint confidence threshold (as the demo)
 TOL = 0.15          # event matching tolerance (s)
+GROSS = 0.2         # keypoint error (leg lengths, from the clip's median offset) counted as a gross error
 EDGE = 0.08         # gold events closer than this to a clip edge are not scored
 CONDITIONS = ["real", "mocap", "sim0.02", "sim0.04"]
 JOINT_TYPES = ["hip", "knee", "ankle", "heel", "toe"]
@@ -145,12 +147,15 @@ def keypoint_rows(xv, vv, xt, base, near, leg_m):
             rows.append(dict(base, joint=name[2:], leg="near" if name[0] == near else "far", detected=ok.mean()))
             continue
         e = xv[ok, j] - xt[ok, j]
+        gross = np.linalg.norm(e - np.median(e, 0), axis=-1) > GROSS
         b = e.mean(0)
         r = e - b
+        rr = e[~gross] - np.median(e[~gross], 0) if (~gross).sum() > 3 else r
+        robust = 1.4826 * np.median(np.abs(rr - np.median(rr, 0)))
         ac = np.mean([np.corrcoef(r[:-1, k], r[1:, k])[0, 1] for k in range(2)]) if ok.sum() > 6 else np.nan
         rows.append(dict(base, joint=name[2:], leg="near" if name[0] == near else "far", detected=ok.mean(),
                          rms=np.sqrt((e ** 2).mean()), bias=np.sqrt((b ** 2).mean()), jitter=r.std(),
-                         bias_x=b[0], bias_y=b[1], lag1_autocorr=ac, rms_cm=np.sqrt((e ** 2).mean()) * leg_m * 100))
+                         bias_x=b[0], bias_y=b[1], lag1_autocorr=ac, gross_frac=gross.mean(), jitter_robust=robust, rms_cm=np.sqrt((e ** 2).mean()) * leg_m * 100))
     return rows
 
 
@@ -175,8 +180,9 @@ def run(clips, an: Analyzer, offsets, seed=0):
         inputs = {"real": (xv, vv), "mocap": (xt, vt)}
         for lv in (0.02, 0.04):
             inputs[f"sim{lv}"] = augment.apply(xt, rng, augment.Noise.level(lv), far=far)
+        hs = sorted(e for k_, v_ in c["events"].items() if k_.startswith("HS") for e in v_ if e >= 0)
         meta.append(dict(subject=c["subject"], trial=c["trial"], near=c["near"], sync_err_px=c["sync_err_px"],
-                         T=T, **info))
+                         first_plate_hs_s=hs[0] if hs else np.nan, T=T, **info))
         base0 = dict(subject=c["subject"], trial=c["trial"], near=c["near"])
         keypoint_rows_ = keypoint_rows(xv, vv, xt, dict(base0, condition="real"), c["near"], leg2d)
         kp_rows += keypoint_rows_
@@ -195,10 +201,14 @@ def run(clips, an: Analyzer, offsets, seed=0):
                 ang_rows += angle_rows(true_ang, pang, base, c["near"])
                 sp_rows.append(dict(base, true_ll=true_speed_ll, pred_ll=psp, true_ms=c["speed_ms"],
                                     pred_ms=psp * leg2d))
-        if k % 100 == 0:
-            print(f"{k}/{len(clips)}", flush=True)
     return (pd.DataFrame(ev_rows), pd.DataFrame(tim_rows), pd.DataFrame(ang_rows), pd.DataFrame(kp_rows),
             pd.DataFrame(sp_rows), pd.DataFrame(meta))
+
+
+def _worker(clips, seed):
+    import torch
+    torch.set_num_threads(1)
+    return run(clips, Analyzer(), zeni_offsets(), seed=seed)
 
 
 # ---------------------------------------------------------------- summaries
@@ -212,7 +222,7 @@ def event_summary(E):
                          recall=n_hit / max(n_true, 1), fp=d.fp.sum(),
                          mae_ms=np.abs(errs).mean() if len(errs) else np.nan,
                          median_ae_ms=np.median(np.abs(errs)) if len(errs) else np.nan,
-                         bias_ms=errs.mean() if len(errs) else np.nan))
+                         bias_ms=errs.mean() if len(errs) else np.nan, sd_ms=errs.std() if len(errs) else np.nan))
     return pd.DataFrame(rows)
 
 
@@ -221,7 +231,7 @@ def reg(t, p):
     t, p = t[ok], p[ok]
     if len(t) < 3:
         return dict(n=len(t))
-    return dict(n=len(t), mae=np.abs(p - t).mean(), bias=(p - t).mean(),
+    return dict(n=len(t), mae=np.abs(p - t).mean(), bias=(p - t).mean(), sd=(p - t).std(),
                 r=np.corrcoef(t, p)[0, 1] if p.std() > 0 and t.std() > 0 else np.nan,
                 slope=np.polyfit(t, p, 1)[0] if t.std() > 0 else np.nan,
                 mean_pred_mae=np.abs(t - t.mean()).mean())
@@ -233,8 +243,9 @@ def rom_subject(A):
     for (cond, method, sub, joint, side), d in A.groupby(["condition", "method", "subject", "joint", "side"]):
         near = d[d.leg == "near"]
         rows.append(dict(condition=cond, method=method, subject=sub, joint=joint, side=side,
-                         true=d.true_exc.mean(), pred_all=d.pred_exc.mean(),
-                         pred_near=near.pred_exc.mean() if len(near) else np.nan, n=len(d)))
+                         true_all=d.true_exc.mean(), pred_all=d.pred_exc.mean(),
+                         true_near=near.true_exc.mean() if len(near) else np.nan,
+                         pred_near=near.pred_exc.mean() if len(near) else np.nan, n=len(d), n_near=len(near)))
     return pd.DataFrame(rows)
 
 
@@ -245,8 +256,9 @@ def rom_si(R):
         if not {"L", "R"} <= set(d.index):
             continue
         si = lambda col: 100 * (d.loc["L", col] - d.loc["R", col]) / (0.5 * (d.loc["L", col] + d.loc["R", col]))  # noqa: E731
-        rows.append(dict(condition=cond, method=method, subject=sub, joint=joint, true_si=si("true"),
-                         pred_si_all=si("pred_all"), pred_si_near=si("pred_near")))
+        rows.append(dict(condition=cond, method=method, subject=sub, joint=joint,
+                         true_si_all=si("true_all"), pred_si_all=si("pred_all"),
+                         true_si_near=si("true_near"), pred_si_near=si("pred_near")))
     return pd.DataFrame(rows)
 
 
@@ -263,17 +275,30 @@ def main():
     ap.add_argument("--clips", default=str(CLIPS))
     ap.add_argument("--out", default=str(OUT))
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=12)
+    ap.add_argument("--summarise-only", action="store_true", help="recompute summaries from the saved per-clip tables")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    if a.summarise_only:
+        E = pd.read_parquet(out / "events_raw.parquet")
+        Tm, A, KP, SP, META = (pd.read_csv(out / f"{n}.csv") for n in ("timing", "angles", "keypoint_error", "speed", "clips"))
+        return summarise(out, E, Tm, A, KP, SP, META)
     clips = pickle.load(open(a.clips, "rb"))
     if a.limit:
         clips = clips[:a.limit]
-    an = Analyzer()
-    E, Tm, A, KP, SP, META = run(clips, an, zeni_offsets())
+    subs = sorted({c["subject"] for c in clips})
+    chunks = [[c for c in clips if c["subject"] in subs[i::a.workers]] for i in range(a.workers)]
+    with ProcessPoolExecutor(a.workers) as ex:
+        parts = list(ex.map(_worker, chunks, range(len(chunks))))
+    E, Tm, A, KP, SP, META = (pd.concat([p[k] for p in parts], ignore_index=True) for k in range(6))
     E.to_parquet(out / "events_raw.parquet")
     for name, df in (("timing", Tm), ("angles", A), ("keypoint_error", KP), ("speed", SP), ("clips", META)):
         df.to_csv(out / f"{name}.csv", index=False)
+    summarise(out, E, Tm, A, KP, SP, META)
+
+
+def summarise(out, E, Tm, A, KP, SP, META):
     ES = event_summary(E)
     ES.to_csv(out / "events.csv", index=False)
     TS = pd.DataFrame([dict(condition=c, method=m, measure=ms, **reg(d.true.to_numpy(), d.pred.to_numpy()))
@@ -289,10 +314,10 @@ def main():
     R.to_csv(out / "rom_subject.csv", index=False)
     SI = rom_si(R)
     SI.to_csv(out / "rom_si.csv", index=False)
-    SIS = pd.DataFrame([dict(condition=c, method=m, joint=j, protocol=p, **reg(d.true_si.to_numpy(), d[f"pred_si_{p}"].to_numpy()))
+    SIS = pd.DataFrame([dict(condition=c, method=m, joint=j, protocol=p, **reg(d[f"true_si_{p}"].to_numpy(), d[f"pred_si_{p}"].to_numpy()))
                         for (c, m, j), d in SI.groupby(["condition", "method", "joint"]) for p in ("all", "near")])
     SIS.to_csv(out / "rom_si_summary.csv", index=False)
-    KS = KP.groupby(["joint", "leg"])[["detected", "rms", "bias", "jitter", "lag1_autocorr", "rms_cm"]].mean().reset_index()
+    KS = KP.groupby(["joint", "leg"])[["detected", "rms", "bias", "jitter", "jitter_robust", "gross_frac", "lag1_autocorr", "rms_cm"]].mean().reset_index()
     KS.to_csv(out / "keypoint_summary.csv", index=False)
     SPS = pd.DataFrame([dict(condition=c, method=m, **reg(d.true_ms.to_numpy(), d.pred_ms.to_numpy()))
                         for (c, m), d in SP.groupby(["condition", "method"])])
@@ -301,7 +326,9 @@ def main():
         f.write(f"# Kuopio external validation\n\n{len(META)} clips, {META.subject.nunique()} subjects. "
                 f"Median sync error {META.sync_err_px.median():.1f} px; L/R swaps repaired in "
                 f"{100 * META.swap_frac.mean():.1f} % of frames; facing direction correct in "
-                f"{100 * META.direction_ok.mean():.1f} % of clips.\n\n")
+                f"{100 * META.direction_ok.mean():.1f} % of clips. Sync check (force plates not used by the sync): "
+                f"first plate heel strike {META.first_plate_hs_s.median():.3f} s after the clip start "
+                f"(IQR {META.first_plate_hs_s.quantile(.25):.3f}-{META.first_plate_hs_s.quantile(.75):.3f}).\n\n")
         for title, df in (("Keypoint error (real OpenPose vs mocap, leg lengths)", KS), ("Events", ES),
                           ("Timing (per clip)", TS), ("Angles (per clip)", AS),
                           ("ROM symmetry (per subject)", SIS), ("Speed (m/s, per clip)", SPS)):

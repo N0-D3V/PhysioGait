@@ -34,6 +34,7 @@ def main():
     for i, g in enumerate(ks.gross_frac):
         a.text(i, max(ks.bias.iloc[i], ks.jitter_robust.iloc[i]) + 0.004, f"{100 * g:.0f}% gross", ha="center", fontsize=8)
     a.set_xticks(x, ks.index)
+    a.set_ylim(0, 0.095)
     a.set_ylabel("leg lengths")
     a.set_title("Keypoint error: real OpenPose vs mocap")
     a.legend(fontsize=7, loc="upper left")
@@ -51,7 +52,7 @@ def main():
     # 3. per-clip knee excursion
     A = pd.read_csv(K / "angles.csv")
     a = ax[0, 2]
-    for m, mk in (("model", "o"), ("classic", "x")):
+    for m, mk in (("classic", "x"), ("model", "o")):
         d = A[(A.condition == "real") & (A.method == m) & (A.joint == "knee")]
         mae = np.abs(d.pred_exc - d.true_exc).mean()
         a.scatter(d.true_exc, d.pred_exc, s=6, marker=mk, alpha=0.35,
