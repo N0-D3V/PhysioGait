@@ -6,6 +6,9 @@ Each trial gets ONE noise draw over its whole length (fixed far leg, keypoint bi
 camera tilt, as in a real recording), is tiled into windows, and every method's per-window strides
 are pooled before computing the outputs, so symmetry is measured over all strides of the trial
 (30 s treadmill trials ≈ 50 strides; Toronto passes ≈ 9 s; Fukuchi overground = one 3 s pass).
+--two-pass: the recording protocol "walk across and back": each trial is noised twice, once with
+each leg as the far leg, and each leg's strides are taken from the pass where it is nearest the
+camera (writes <split>_trial_twopass/).
 Methods: `<run>+derived` (events + angle curves -> formulas, strides pooled), `<run>` (pooled
 heads, averaged over windows), classic (strides pooled), mean.
 Writes outputs/eval/<split>_trial/{predictions.parquet, regression.csv, symmetry_bins.csv}.
@@ -57,6 +60,7 @@ def main():
     ap.add_argument("runs", nargs="+")
     ap.add_argument("--split", default="test")
     ap.add_argument("--levels", type=float, nargs="+", default=[0, 0.01, 0.02, 0.04])
+    ap.add_argument("--two-pass", action="store_true", help="each leg measured from its near-camera pass")
     a = ap.parse_args()
     torch.set_num_threads(4)
 
@@ -68,26 +72,33 @@ def main():
     rows = []
     for lev in a.levels:
         rng = np.random.default_rng(int(lev * 1e4) + 11)
-        noisy = [augment.apply(tr.pose, rng, augment.Noise.level(lev)) for tr in trials]
-        items = [(k, i0, i1) for k, tr in enumerate(trials) for i0, i1 in tile_windows(tr, W)]
-        X = [noisy[k][0][i0:i1] for k, i0, i1 in items]
-        V = [noisy[k][1][i0:i1] for k, i0, i1 in items]
+        # passes: (far leg, sides whose strides are kept); one pass with a random far leg by default
+        passes = [("R", (0,)), ("L", (1,))] if a.two_pass else [(None, (0, 1))]
+        noisy, items = [], []
+        for far, keep in passes:
+            for k, tr in enumerate(trials):
+                noisy.append(augment.apply(tr.pose, rng, augment.Noise.level(lev), far=far))
+                items += [(k, i0, i1, len(noisy) - 1, keep) for i0, i1 in tile_windows(tr, W)]
+        X = [noisy[q][0][i0:i1] for _, i0, i1, q, _ in items]
+        V = [noisy[q][1][i0:i1] for _, i0, i1, q, _ in items]
         strides = {m: [[] for _ in trials] for m in ["classic"] + [f"{r}+derived" for r in models]}
         heads = {r: [[] for _ in trials] for r in models}
         speed = {m: [[] for _ in trials] for m in strides}
-        for (k, i0, _), x, v in zip(items, X, V):
+        for (k, i0, _, _, keep), x, v in zip(items, X, V):
             ev, y = classic.predict(x, v, offsets)
             ang = np.stack([sagittal_angles(classic.to_sag(x, v))[n] for n in ANG_NAMES], -1)
             S = strides_from_events(ev, ang)
+            S = S[np.isin(S[:, 2], keep)]
             S[:, :2] += i0 / FS
             strides["classic"][k].append(S)
             speed["classic"][k].append(y[TI["speed_ll"]])
         for r, (m, cfg, norm) in models.items():
             probs, ys, angs = run_model(m, norm, X, V, cfg.get("features", "v1"))
-            for j, (k, i0, _) in enumerate(items):
+            for j, (k, i0, _, _, keep) in enumerate(items):
                 heads[r][k].append(ys[j])
                 if angs is not None:
                     S = strides_from_events(decode_events(probs[j]), angs[j])
+                    S = S[np.isin(S[:, 2], keep)]
                     S[:, :2] += i0 / FS
                     strides[f"{r}+derived"][k].append(S)
                     speed[f"{r}+derived"][k].append(ys[j][TI["speed_ll"]])
@@ -112,7 +123,7 @@ def main():
                 rows.append(base | dict(method=meth) | {f"pred_{n}": p[i] for i, n in enumerate(TARGET_NAMES)})
         print(f"level {lev}: done", flush=True)
 
-    out = EVAL / f"{a.split}_trial"
+    out = EVAL / f"{a.split}_trial{'_twopass' if a.two_pass else ''}"
     out.mkdir(parents=True, exist_ok=True)
     P = pd.DataFrame(rows)
     for c in ("true", "pred"):
