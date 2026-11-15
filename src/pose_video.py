@@ -98,7 +98,7 @@ class PoseEstimator:
         sx, sy = self.s.run(None, {self.s.get_inputs()[0].name: x})
         sx, sy = sx[0], sy[0]                            # [26, 384], [26, 512]: SimCC, split ratio 2
         px, py = sx.argmax(1) / 2.0, sy.argmax(1) / 2.0
-        score = 0.5 * (sx.max(1) + sy.max(1))
+        score = np.minimum(sx.max(1), sy.max(1))       # as mmpose get_simcc_maximum
         Mi = cv2.invertAffineTransform(M)
         pts = np.c_[px, py, np.ones(len(px))] @ Mi.T
         return pts.astype(np.float32), score.astype(np.float32)
@@ -110,17 +110,38 @@ def _iou(a, b):
     return inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter + 1e-9)
 
 
+def _box_from_keypoints(k: np.ndarray, sc: np.ndarray, size, thresh: float = 0.3, margin: float = 0.12):
+    ok = sc > thresh
+    if ok.sum() < 8:
+        return None
+    x1, y1 = k[ok].min(0)
+    x2, y2 = k[ok].max(0)
+    mw, mh = margin * (x2 - x1), margin * (y2 - y1)
+    return np.array([max(0, x1 - mw), max(0, y1 - mh), min(size[0], x2 + mw), min(size[1], y2 + mh)])
+
+
 class PoseTracker:
     """Single-subject keypoints for a whole video.
 
-    The subject is the largest person in the first detections, then followed by box overlap.
-    Detection runs every `det_every` frames; in between the last box is reused, re-centred on
-    the previous frame's keypoints.
+    The subject is the largest confident person in the first detection. Between detections
+    (every `det_every` frames, or sooner when the keypoints become unsure) the box comes from the
+    previous frame's keypoints, the usual top-down tracking scheme; the detector dominates the
+    cost (~270 ms vs ~30 ms for the pose model on CPU).
     """
 
-    def __init__(self, threads: int = 4, det_every: int = 2):
+    def __init__(self, threads: int = 4, det_every: int = 15):
         ensure_models()
         self.det, self.pose, self.det_every = Detector(threads), PoseEstimator(threads), det_every
+
+    def _detect(self, img, box):
+        d = self.det(img)
+        if not len(d):
+            return None
+        if box is None:
+            area = (d[:, 2] - d[:, 0]) * (d[:, 3] - d[:, 1])
+            return d[np.argmax(area * d[:, 4]), :4]
+        ious = np.array([_iou(box, b) for b in d])
+        return d[np.argmax(ious), :4] if ious.max() > 0.1 else None
 
     def run(self, path: str, max_seconds: float = 90.0, progress=None):
         cap = cv2.VideoCapture(str(path))
@@ -130,23 +151,16 @@ class PoseTracker:
         n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         n_max = int(max_seconds * fps)
         kps, scores, boxes = [], [], []
-        box, size, i = None, None, 0
+        box, size, i, since = None, None, 0, 0
         while i < n_max:
             ok, img = cap.read()
             if not ok:
                 break
             size = img.shape[1], img.shape[0]
-            if box is None or i % self.det_every == 0:
-                d = self.det(img)
-                if len(d):
-                    if box is None:
-                        area = (d[:, 2] - d[:, 0]) * (d[:, 3] - d[:, 1])
-                        cand = d[np.argmax(area * d[:, 4])]
-                    else:
-                        ious = np.array([_iou(box, b) for b in d])
-                        cand = d[np.argmax(ious)] if ious.max() > 0.1 else None
-                    if cand is not None:
-                        box = cand[:4] if box is None else 0.5 * box + 0.5 * cand[:4]
+            if box is None or since >= self.det_every:
+                det = self._detect(img, box)
+                if det is not None:
+                    box, since = det, 0
             if box is None:
                 kps.append(np.full((26, 2), np.nan, np.float32))
                 scores.append(np.zeros(26, np.float32))
@@ -154,6 +168,11 @@ class PoseTracker:
             else:
                 k, s = self.pose(img, box)
                 kps.append(k), scores.append(s), boxes.append(box.copy())
+                nxt = _box_from_keypoints(k, s, size)
+                if nxt is None or float(np.median(s)) < 0.35:
+                    since = self.det_every                   # unsure: detect again next frame
+                else:
+                    box, since = nxt, since + 1
             i += 1
             if progress is not None and i % 15 == 0:
                 progress(min(i / max(min(n_total, n_max), 1), 1.0), desc=f"pose: frame {i}")

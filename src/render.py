@@ -152,7 +152,6 @@ def _strip(rep, w: int, t: float, t_max: float, h: int = 46) -> np.ndarray:
     px = lambda tt: int(8 + (w - 16) * tt / max(t_max, 1e-6))  # noqa: E731
     for k, s in enumerate("LR"):
         y0 = 6 + k * 19
-        cv2.putText(img, s, (px(0) - 6, y0 + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.0001, (0, 0, 0), 1)
         for a, b in st[s]:
             cv2.rectangle(img, (px(a), y0), (max(px(a) + 1, px(b)), y0 + 14), SIDE_BGR[s], -1)
     cv2.line(img, (px(t), 0), (px(t), h), (40, 40, 40), 2)
@@ -181,7 +180,7 @@ def annotate_video(src: str, rep, out: str, max_width: int = 960, max_seconds: f
     t_max = len(rep.px) / FS
     write, close = _writer(out, w, h + 46, fps)
     st = {s: stance_intervals(rep.events, s) for s in "LR"}
-    vis = rep.vis_px if getattr(rep, "vis_px", None) is not None else rep.vis
+    vis = rep.vis
     i = 0
     while i < max_seconds * fps:
         ok, img = cap.read()
@@ -217,3 +216,27 @@ def stick_video(rep, out: str, size=(640, 420), scale: float = 170.0) -> str:
         write(np.vstack([img, _strip(rep, w, k / FS, t_max)]))
     close()
     return out
+
+
+def timeline_plot(rep):
+    """Speed per 5 s window and cadence per stride over the clip (shows changes within a recording)."""
+    fig, axs = plt.subplots(1, 2, figsize=(13, 2.8))
+    ws = rep.window_speed
+    if ws is not None and len(ws):
+        k = rep.leg_length_m or 1.0
+        axs[0].plot(ws[:, 0], ws[:, 1] * k, color=SIDE_COL["L"], marker="o", ms=5, lw=1.8)
+        axs[0].set_ylabel("m/s" if rep.leg_length_m else "leg lengths/s")
+        axs[0].set_ylim(bottom=0)
+    axs[0].set_title("Walking speed (per 5 s window)")
+    S = rep.strides
+    for s in "LR":
+        q = S[S.side == s]
+        axs[1].plot((q.start_s + q.end_s) / 2, 120 / q.stride_time, color=SIDE_COL[s], marker="o", ms=4, lw=1,
+                    label="left strides" if s == "L" else "right strides")
+    axs[1].set_ylabel("steps/min")
+    axs[1].set_title("Cadence per stride")
+    axs[1].legend(fontsize=8, loc="best")
+    for a in axs:
+        a.set_xlabel("time (s)")
+    fig.tight_layout()
+    return fig
