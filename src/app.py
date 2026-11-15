@@ -59,7 +59,8 @@ def summary_table(rep, gold=None):
 def quality_text(rep, extra="", video=False):
     q = rep.quality
     lines = [f"**Typical errors** are those measured on held-out people at pose noise σ = {q['sigma']:.2f} leg lengths "
-             f"(0 = perfect motion capture, 0.02 = good video). Real video tested worse than 0.02, so treat them as optimistic.",
+             f"(0 = perfect motion capture). Real research video matched about 0.04; event timing and hip angles were "
+             f"somewhat worse still, so treat them as a lower bound.",
              f"**Strides measured:** {q['n_strides_L']} left, {q['n_strides_R']} right. "
              f"Visible keypoints: {100 * q['visible_frac']:.0f} %."]
     if video:
@@ -154,11 +155,13 @@ ankle range of motion, peak knee flexion, stride-time variability, and the left/
 
 ### Validated on (held-out people)
 Gait-lab recordings with simulated video noise (Fukuchi, Ferber, Toronto older adults), and **real video** (Kuopio,
-42 people, against motion capture and force plates): heel strike ±20 ms, speed ±0.08 m/s, knee range of motion ±6°.
+24 people, against motion capture and force plates): heel strike ±16 ms, step time ±17 ms, speed ±0.04 m/s, knee
+swing range ±6–7°. The model was also trained on real pose-estimator mistakes from 18 other Kuopio people.
 
 ### Known limits
-- Real video is noisier than the σ = 0.02 used for the error column, so those errors are optimistic.
-- Hip- and ankle-motion symmetry were not reliable on real video; knee-motion symmetry was.
+- The error column uses simulated noise σ = 0.04, the level real video matched; timing on real video was a bit worse.
+- Joint-motion symmetry is not reliable on real video yet (hip and ankle no better than guessing, knee only slightly).
+- This demo's pose model (RTMPose) has not itself been checked against a gait lab; the real-video test used OpenPose.
 - Stance/swing-time asymmetry is under-reported by ~40 %; step-time asymmetry by ~10–25 %.
 - Side view only (no sideways sway). One person, straight walkway or treadmill.
 

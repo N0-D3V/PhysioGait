@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from helpers.analysis import ROOT
 from helpers.gaitdata import ANG_NAMES, EVENTS, FS, IN_JOINTS, derive, soft_events
 
 HIPS = [IN_JOINTS.index("L_hip"), IN_JOINTS.index("R_hip")]
@@ -23,6 +24,7 @@ class Noise:
     cross_thresh: float = 0.06   # far joint hidden when within this horizontal distance of the near one
     scale_sd: float = 0.0
     rot_deg_sd: float = 0.0
+    real: float = 0.0            # scale of replayed real pose error (Kuopio error tracks, see kuopio_noise.py)
 
     @staticmethod
     def level(sigma: float) -> "Noise":
@@ -33,13 +35,42 @@ class Noise:
                      scale_sd=sigma, rot_deg_sd=50 * sigma)
 
     @staticmethod
-    def random(rng: np.random.Generator) -> "Noise":
-        """Training distribution: 20 % clean, otherwise a random mix up to roughly level 0.06."""
-        if rng.random() < 0.2:
+    def video() -> "Noise":
+        """Evaluation preset: real pose error replayed at its measured size."""
+        return Noise(real=1.0)
+
+    @staticmethod
+    def random(rng: np.random.Generator, real: bool = False) -> "Noise":
+        """Training distribution: 20 % clean, otherwise a random synthetic mix up to roughly level 0.06.
+        real (v5): 40 % of windows get replayed real pose error instead (x0.7-1.3, plus a little jitter)."""
+        u = rng.random()
+        if u < 0.2:
             return Noise()
+        if real and u < 0.6:
+            return Noise(sigma=rng.uniform(0, 0.015), real=rng.uniform(0.7, 1.3))
         s = rng.uniform(0.0, 0.06)
         return Noise(sigma=s, bias=rng.uniform(0, s), dropout=rng.uniform(0, 0.1),
                      far_leg=rng.random() < 0.5, scale_sd=0.05, rot_deg_sd=3.0)
+
+
+_BANK = None
+
+
+def real_error(T: int, rng: np.random.Generator, near: str) -> tuple[np.ndarray, np.ndarray]:
+    """A T-frame track of real pose error (and visibility), stitched from random Kuopio clips, near leg = `near`."""
+    global _BANK
+    if _BANK is None:
+        d = np.load(ROOT / "data" / "processed" / "kuopio_pose_error.npz")
+        starts = np.r_[0, np.cumsum(d["lens"])]
+        _BANK = [(d["err"][a:b], d["vis"][a:b], n) for a, b, n in zip(starts[:-1], starts[1:], d["near"])]
+    es, vs, n = [], [], 0
+    while n < T:
+        e, v, clip_near = _BANK[rng.integers(len(_BANK))]
+        if clip_near != near:
+            e, v = e[:, JOINT_SWAP], v[:, JOINT_SWAP]
+        es.append(e), vs.append(v)
+        n += len(e)
+    return np.concatenate(es)[:T], np.concatenate(vs)[:T]
 
 
 def apply(x: np.ndarray, rng: np.random.Generator, nz: Noise, far: str | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -56,6 +87,10 @@ def apply(x: np.ndarray, rng: np.random.Generator, nz: Noise, far: str | None = 
         mult[SIDE_IDX[far]] = nz.far_mult
     x += rng.normal(0, nz.bias, (1, Jn, 2)) * mult[None, :, None]
     x += rng.normal(0, nz.sigma, (T, Jn, 2)) * mult[None, :, None]
+    if nz.real:
+        e, v = real_error(T, rng, near)
+        x += nz.real * e
+        vis *= v
     # pelvis origin from the noisy hips
     x -= x[:, HIPS].mean(1, keepdims=True)
     if nz.scale_sd:

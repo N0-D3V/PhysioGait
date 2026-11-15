@@ -1,6 +1,9 @@
-"""Test on real video: Kuopio OpenPose keypoints vs Vicon mocap and force plates (never used for training).
+"""Test on real video: Kuopio OpenPose keypoints vs Vicon mocap and force plates.
 
-    ./py src/evaluate_kuopio.py [--clips data/processed/kuopio_clips.pkl] [--out outputs/kuopio]
+    ./py src/evaluate_kuopio.py [--clips data/processed/kuopio_clips.pkl] [--out outputs/kuopio] [--half all|test]
+
+By default only the held-out subjects are scored: the pose errors of subjects 01-26 were used for training
+(helpers/kuopio_noise.py). --half all scores every subject (fair only for models trained without them, e.g. v4).
 
 Each ~1 s clip is run through the same steps as the demo, for the model and the classic method, with four inputs
 on the same frames: real video keypoints, clean mocap, and mocap with simulated noise (σ 0.02 and 0.04).
@@ -20,6 +23,7 @@ from helpers.analysis import ROOT
 from helpers.canonical import J, normalise, resample, sagittal_angles
 from evaluate import match, regression_metrics
 from helpers.gaitdata import ANG_NAMES, FS, IN_IDX, IN_JOINTS, TI, zeni_offsets
+from helpers.kuopio_noise import is_fit
 from video_pipeline import Analyzer, facing, normalise_pass, prepare
 
 CLIPS = ROOT / "data" / "processed" / "kuopio_clips.pkl"
@@ -205,10 +209,11 @@ def main():
     ap.add_argument("--clips", default=str(CLIPS))
     ap.add_argument("--out", default=str(OUT))
     ap.add_argument("--workers", type=int, default=12)
+    ap.add_argument("--half", choices=["all", "test"], default="test")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    clips = pickle.load(open(a.clips, "rb"))
+    clips = [c for c in pickle.load(open(a.clips, "rb")) if a.half == "all" or not is_fit(c["subject"])]
     subjects = sorted({c["subject"] for c in clips})
     chunks = [[c for c in clips if c["subject"] in subjects[i::a.workers]] for i in range(a.workers)]
     with ProcessPoolExecutor(a.workers) as ex:

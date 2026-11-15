@@ -21,6 +21,7 @@ from model import decode_events
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--levels", type=float, nargs="+", default=[0, 0.01, 0.02, 0.04])
+    ap.add_argument("--out", default="test_trial")
     a = ap.parse_args()
     torch.set_num_threads(4)
     m, cfg, norm = load_model()
@@ -58,7 +59,7 @@ def main():
                 rows.append(base | dict(method=meth) | {f"pred_{n}": p[i] for i, n in enumerate(TARGET_NAMES)})
         print(f"noise level {lev}: done", flush=True)
 
-    out = EVAL / "test_trial"
+    out = EVAL / a.out
     out.mkdir(parents=True, exist_ok=True)
     P = pd.DataFrame(rows)
     for c in ("true", "pred"):

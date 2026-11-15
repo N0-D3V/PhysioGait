@@ -3,11 +3,12 @@ at several levels of simulated video-pose noise.
 
     ./py src/evaluate.py [--levels 0 0.01 0.02 0.04 0.08]   -> outputs/eval/test/
 
-Methods: `bigru_v4+derived` (outputs computed from the predicted events and angles, the main method),
-`bigru_v4` (the model's whole-window heads), `classic`, `mean`.
+Methods: `bigru_v5+derived` (outputs computed from the predicted events and angles, the main method),
+`bigru_v5` (the model's whole-window heads), `classic`, `mean`.
 """
 import argparse
 import json
+import os
 
 import numpy as np
 import pandas as pd
@@ -21,7 +22,7 @@ from helpers.gaitdata import ANG_NAMES, EVENTS, FS, TARGET_NAMES, TARGETS, TI, d
     window_labels, zeni_offsets
 from model import GaitNet, decode_events, features
 
-RUN = "bigru_v4"
+RUN = os.environ.get("GAIT_MODEL", "bigru_v5")   # the model used everywhere; GAIT_MODEL=bigru_v4 to compare
 MODELS = ROOT / "outputs" / "models"
 EVAL = ROOT / "outputs" / "eval"
 EDGE = 0.2   # events this close to a window edge are not scored

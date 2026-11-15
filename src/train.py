@@ -1,6 +1,7 @@
 """Train the gait model on mocap made to look like video (pose noise, left/right mirroring, synthetic limps).
 
     ./py src/train.py [--name bigru_v4] [--epochs 50]   -> outputs/models/<name>/ (~2.5 h on CPU)
+    ./py src/train.py --name bigru_v5 --init bigru_v4 --epochs 25 --lr 3e-4 --real-noise   (v5: fine-tune v4)
 """
 import argparse
 import json
@@ -67,6 +68,9 @@ def main():
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threads", type=int, default=6)
+    ap.add_argument("--init", help="start from this trained model's weights")
+    ap.add_argument("--lr", type=float, default=LR)
+    ap.add_argument("--real-noise", action="store_true", help="also replay real Kuopio pose errors (v5)")
     a = ap.parse_args()
     torch.manual_seed(a.seed)
     torch.set_num_threads(a.threads)
@@ -80,7 +84,8 @@ def main():
     A = np.concatenate([tr.ang for tr in train])
     norm = {"mean": np.nanmean(Y, 0).tolist(), "std": np.nanstd(Y, 0).tolist(),
             "ang_mean": A.mean(0).tolist(), "ang_std": A.std(0).tolist()}
-    (out / "config.json").write_text(json.dumps({"hidden": 128, "layers": 2, "W": W, "epochs": a.epochs, "seed": a.seed}))
+    (out / "config.json").write_text(json.dumps({"hidden": 128, "layers": 2, "W": W, "epochs": a.epochs, "seed": a.seed,
+                                                          "init": a.init, "lr": a.lr, "real_noise": a.real_noise}))
     (out / "norm.json").write_text(json.dumps(norm | {"names": TARGET_NAMES}, indent=1))
     normt = {k: torch.tensor(v) for k, v in norm.items()}
 
@@ -91,12 +96,15 @@ def main():
         for i0, i1 in tile_windows(tr, W):
             val_items.setdefault(i1 - i0, []).append((tr, i0, i1))
     vrng = np.random.default_rng(1234)
-    val_batches = [make_batch(g[i:i + 256], vrng, lambda r: augment.Noise.level(0.02))
+    val_batches = [make_batch(g[i:i + 256], vrng, noise)
+                   for noise in [lambda r: augment.Noise.level(0.02)] + [lambda r: augment.Noise.video()] * a.real_noise
                    for g in val_items.values() for i in range(0, len(g), 256)]
 
     model = GaitNet()
     model.ang_mean.copy_(normt["ang_mean"]), model.ang_std.copy_(normt["ang_std"])
-    opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    if a.init:
+        model.load_state_dict(torch.load(ROOT / "outputs" / "models" / a.init / "model.pt", weights_only=True))
+    opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=3)
     weight = {"events": EVENT_WEIGHT}
     best, bad, hist = np.inf, 0, []
@@ -105,7 +113,7 @@ def main():
         model.train()
         train_loss = []
         for _ in range(STEPS):
-            L = losses(model, make_batch(draw_windows(groups, rng), rng, augment.Noise.random, augment_legs=True), normt)
+            L = losses(model, make_batch(draw_windows(groups, rng), rng, lambda r: augment.Noise.random(r, a.real_noise), augment_legs=True), normt)
             total = sum(weight.get(k, 1.0) * v for k, v in L.items())
             opt.zero_grad()
             total.backward()

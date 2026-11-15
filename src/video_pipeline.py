@@ -22,7 +22,7 @@ from model import decode_events
 from pose_video import H
 
 W = 150                      # 5 s windows at 30 Hz
-VIDEO_SIGMA = 0.02           # noise level of the validation results quoted for video (see WRITEUP: real video is worse)
+VIDEO_SIGMA = 0.04           # simulated noise level whose errors are quoted for real video (closest match on Kuopio)
 LEG_PER_HEIGHT = 0.49        # hip-to-ankle length / body height (average proportion)
 SWAP = augment.JOINT_SWAP
 TOE = ["big_toe", "small_toe"]
